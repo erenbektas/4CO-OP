@@ -35,11 +35,13 @@ function commandExists(command) {
       return true
     }
 
-    const escaped = String(command).replace(/'/g, "''")
+    const cmdB64 = Buffer.from(String(command)).toString('base64')
+    const psScript = `$cmd = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${cmdB64}')); Get-Command $cmd -ErrorAction Stop | Out-Null`
+    const encodedCmd = Buffer.from(psScript, 'utf16le').toString('base64')
     const powershellProbe = spawnSync('powershell.exe', [
       '-NoProfile',
-      '-Command',
-      `Get-Command '${escaped}' -ErrorAction Stop | Out-Null`
+      '-EncodedCommand',
+      encodedCmd
     ], {
       encoding: 'utf8'
     })
