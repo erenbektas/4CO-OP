@@ -109,7 +109,7 @@ Per-run file that every stage reads + updates for the active run. Schema:
 }
 ```
 
-`<repo-name>` is `path.basename(projectRoot)`; see `buildWorktreeInfo` in `skill/4co-op/scripts/4coop-worktree.mjs`.
+`<repo-name>` is `path.basename(projectRoot)` and `<slug>` is `slugify(feature)` (the slugified feature title); both resolved in `buildWorktreeInfo` in `skill/4co-op/scripts/4coop-worktree.mjs`.
 
 `narrator_log` is a per-run array reserved for a future chat-transcript feature. The helper `appendNarratorEntry` in `skill/4co-op/scripts/4coop-state.mjs` exists but is not currently called by the orchestrator, so the array stays empty on every run. The live event stream (`run_start`, `run_end`, `stage_call`, `window_opened`, `window_closed`, `interruption`, `table_snapshot`, `comment_check_start`, `comment_check_end`) is written to the nightly log file, not to `state.json`; see `docs/privacy.md` and `skill/4co-op/scripts/4coop-logger.mjs`.
 
@@ -317,7 +317,7 @@ skill/4co-op/
 │       ├── review.md
 │       ├── reviewer-input.md    # `gh pr diff` dump for the reviewer
 │       ├── relay/               # stage-to-stage relay prompts (4coop-relay.mjs)
-│       ├── raw/                 # scaffolded placeholder dir; currently unused
+│       ├── raw/                 # created per run by ensureRuntimeDirs; currently unwritten
 │       ├── <stage>-NN.ndjson          # codex stages only: raw --json stream per call
 │       └── <stage>-NN-last-message.txt # codex stages only: last model message per call
 ├── logs/                        # nightly event log (see docs/privacy.md)
@@ -528,7 +528,7 @@ First real-feature suggestion: something with a real acceptance checklist but ti
 
 ## 11. `/4co-op clean` command
 
-Manual cleanup for runs history and orphan worktrees. Packaged as a skill subcommand at `.claude/skills/4co-op/clean.md`.
+Manual cleanup for runs history and orphan worktrees. Packaged as a skill subcommand at `.claude/skills/4co-op/clean.md` (host shim) — the editable source lives at `skill/4co-op/clean.md` and is copied into the shim by the scaffolder.
 
 **Usage:**
 ```
