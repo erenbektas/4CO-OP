@@ -374,7 +374,7 @@ export async function ensureMonitor(paths, config, initialState) {
   })
 
   child.unref()
-  child.stderr.destroy()
+  child.stderr.unref()
 
   const healthy = await waitForHealth(port)
   if (!healthy) {
