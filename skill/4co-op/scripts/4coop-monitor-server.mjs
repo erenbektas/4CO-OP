@@ -47,7 +47,9 @@ function sanitizeRows(rows) {
     exact_tokens: Boolean(row.exact_tokens),
     runtime_ms: Number(row.runtime_ms) || 0,
     calls: Number(row.calls) || 0,
-    active: Boolean(row.active)
+    active: Boolean(row.active),
+    ...(row.last_call !== undefined && { last_call: row.last_call }),
+    ...(row.current_call !== undefined && { current_call: row.current_call })
   }))
 }
 
