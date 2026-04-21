@@ -135,3 +135,9 @@ For cleanup:
 ```bash
 node scripts/4coop.mjs clean -- --dry-run
 ```
+
+## License
+
+Licensed under the [MIT License](./LICENSE). Free to use, modify, and
+distribute; please keep the copyright notice intact to credit the original
+project.
