@@ -322,11 +322,7 @@ export async function ensureMonitor(paths, config, initialState) {
     return { enabled: false, port: null, reused: false }
   }
 
-  // Clean up stale error file from a previous launch so it can't poison this run
   const errorFile = path.join(paths.runtimeDir, '.monitor-listen-error.json')
-  if (pathExists(errorFile)) {
-    try { fs.unlinkSync(errorFile) } catch { /* best-effort */ }
-  }
 
   const cachedPort = readPortFile(paths.monitorPortFile)
   if (cachedPort && await isHealthy(cachedPort)) {
@@ -339,20 +335,50 @@ export async function ensureMonitor(paths, config, initialState) {
   const scriptPath = resolveBundledPath('scripts', '4coop-monitor-server.mjs')
   const child = spawn(process.execPath, [scriptPath, '--port', String(port), '--error-dir', paths.runtimeDir], {
     detached: true,
-    stdio: 'ignore'
+    stdio: ['ignore', 'ignore', 'pipe']
+  })
+
+  // Collect child stderr for diagnostics (even if file write fails)
+  let stderrOutput = ''
+  if (child.stderr) {
+    child.stderr.on('data', (chunk) => { stderrOutput += chunk.toString() })
+  }
+
+  // Short-circuit: if the child exits non-zero before health check completes,
+  // read the error file immediately instead of waiting for full waitForHealth timeout
+  let childExited = false
+  let childExitCode = null
+  child.once('exit', (code) => {
+    childExited = true
+    childExitCode = code
   })
   child.unref()
 
-  const healthy = await waitForHealth(port)
-  if (!healthy) {
+  // Race between waitForHealth and child exit
+  const healthy = await Promise.race([
+    waitForHealth(port),
+    new Promise((resolve) => {
+      child.once('exit', () => resolve(false))
+    })
+  ])
+
+  if (!healthy || (childExited && childExitCode !== 0)) {
     let cause = `Monitor server did not become healthy on port ${port}`
+    if (stderrOutput) {
+      cause += ` (${stderrOutput.trim()})`
+    }
     if (pathExists(errorFile)) {
       try {
         const detail = JSON.parse(fs.readFileSync(errorFile, 'utf8'))
-        cause = `Monitor listen failed on port ${detail.port ?? port}: ${detail.code} (${detail.message})`
-        // Clean up after reading
-        fs.unlinkSync(errorFile)
+        // Validate pid to guard against stale files from concurrent/raced calls
+        if (!detail.pid || detail.pid === child.pid) {
+          cause = `Monitor listen failed on port ${detail.requested_port ?? port}: ${detail.code} (${detail.message})`
+        }
       } catch { /* fall through with generic message */ }
+      finally {
+        // Clean up after reading (only our own or unattributable errors)
+        try { fs.unlinkSync(errorFile) } catch { /* best-effort */ }
+      }
     }
     throw new Error(cause)
   }

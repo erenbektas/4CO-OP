@@ -185,13 +185,15 @@ const server = http.createServer(async (request, response) => {
 // Removed on successful listen so transient post-listen socket errors
 // (e.g. ECONNRESET) don't kill the running server.
 function handleListenError(err) {
-  // Write failure details to a state file so the parent process (which spawns
-  // with stdio:'ignore') can surface the real cause instead of a generic
-  // "did not become healthy" timeout.
+  // Write failure details to a state file so the parent process can surface
+  // the real cause instead of a generic "did not become healthy" timeout.
+  // Also writes to stderr (fd=2) — parent spawns with stdio:['ignore','ignore','pipe']
+  // so this reaches the operator even if the file write fails.
   const failure = {
     code: err.code || 'UNKNOWN',
     message: err?.message ?? String(err),
-    port: args.port,
+    requested_port: args.port,
+    pid: process.pid,
     timestamp: new Date().toISOString(),
   }
 
@@ -206,13 +208,21 @@ function handleListenError(err) {
     // Atomic write: tmp -> rename so reader never sees partial JSON
     fs.writeFileSync(errorTmpFile, JSON.stringify(failure, null, 2), 'utf8')
     fs.renameSync(errorTmpFile, errorLogFile)
-  } catch { /* best-effort; console.error below is secondary */ }
+    // fsync to ensure metadata is committed before we signal exit
+    try {
+      const fd = fs.openSync(errorLogFile, 'r+')
+      fs.fsyncSync(fd)
+      fs.closeSync(fd)
+    } catch { /* best-effort; rename is usually enough */ }
+  } catch { /* fall through to stderr below */ }
 
-  console.error('[monitor] listen failed on port', args.port, ':', failure.code)
+  // Write to stderr — parent captures it via pipe when using stdio:['ignore','ignore','pipe']
+  process.stderr.write(`[monitor] listen failed on port ${args.port}: ${failure.code}\n`)
 
-  // Close server to release handles, then exit via setImmediate so stderr drains
+  // Close server to release handles, then let event loop unwind naturally with exitCode=1
+  // This ensures buffered writes (stderr, fsync) drain before the process dies
   try { server.close() } catch { /* already closed */ }
-  setImmediate(() => { process.exit(1) })
+  process.exitCode = 1
 }
 
 server.on('error', handleListenError)
