@@ -111,7 +111,7 @@ Per-run file that every stage reads + updates for the active run. Schema:
 
 `<repo-name>` is `path.basename(projectRoot)`; see `buildWorktreeInfo` in `skill/4co-op/scripts/4coop-worktree.mjs`.
 
-`narrator_log` is a per-run array reserved for a future chat-transcript feature — the orchestrator currently initializes it empty and does not append to it. The live event stream (`run_start`, `run_end`, `stage_call`, `window_opened`, `window_closed`, `interruption`, `table_snapshot`, `comment_check_start`, `comment_check_end`) is written to the nightly log file, not to `state.json`; see `docs/privacy.md` and `skill/4co-op/scripts/4coop-logger.mjs`.
+`narrator_log` is a per-run array reserved for a future chat-transcript feature. The helper `appendNarratorEntry` in `skill/4co-op/scripts/4coop-state.mjs` exists but is not currently called by the orchestrator, so the array stays empty on every run. The live event stream (`run_start`, `run_end`, `stage_call`, `window_opened`, `window_closed`, `interruption`, `table_snapshot`, `comment_check_start`, `comment_check_end`) is written to the nightly log file, not to `state.json`; see `docs/privacy.md` and `skill/4co-op/scripts/4coop-logger.mjs`.
 
 Why a file, not in-memory: subagents run in isolated contexts. The file is the contract between them.
 
@@ -408,7 +408,7 @@ process_feature(feature):
   state.worktree = {...}
   say("builder", {phase: "starting", branch: state.worktree.branch})
 
-  builder_result = runTrackedStage("builder", plan.md, state.worktree.path)   # 4coop-stage-codex.mjs
+  builder_result = runTrackedStage("builder", plan.md, state.worktree.path)   # 4coop-orchestrator.mjs → 4coop-stage-codex.mjs
   state.builder = builder_result
   say("builder", {phase: "done", commit: builder_result.commit_sha,
                    files: builder_result.files_changed.length,
@@ -438,11 +438,11 @@ process_feature(feature):
 
     if review.issues == []: break
 
-    runTrackedStage("fixer", state.builder.codex_session_id, review.issues)   # 4coop-stage-codex.mjs (codex exec resume)
+    runTrackedStage("fixer", state.builder.codex_session_id, review.issues)   # 4coop-orchestrator.mjs → 4coop-stage-codex.mjs (codex exec resume)
     state.fixer.iterations += 1
     say("fixer", {commits: state.fixer.commits.length})
 
-    verdict = runTrackedStage("gatekeeper", pr)                                # 4coop-stage-codex.mjs
+    verdict = runTrackedStage("gatekeeper", pr)                                # 4coop-orchestrator.mjs → 4coop-stage-codex.mjs
     state.gatekeeper = verdict
     say("gatekeeper", {verdict: verdict.verdict, severity: verdict.severity, pr: pr.url})
 
