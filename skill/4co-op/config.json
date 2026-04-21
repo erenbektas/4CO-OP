@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "models": {
+    "planner": {
+      "cli": "claude",
+      "model": "claude-opus-4-7",
+      "context": "1m",
+      "tag_display": "Opus 4.7 1M"
+    },
+    "builder": {
+      "cli": "codex",
+      "model": "gpt-5.3-codex",
+      "tag_display": "5.3-Codex"
+    },
+    "spec_checker": {
+      "cli": "claude",
+      "model": "claude-sonnet-4-6",
+      "tag_display": "Sonnet 4.6"
+    },
+    "escalation": {
+      "cli": "claude",
+      "model": "claude-opus-4-7",
+      "tag_display": "Opus 4.7"
+    },
+    "reviewer": {
+      "cli": "claude",
+      "model": "claude-opus-4-7",
+      "tag_display": "Opus 4.7"
+    },
+    "fixer": {
+      "cli": "codex",
+      "model": "gpt-5.3-codex",
+      "tag_display": "5.3-Codex"
+    },
+    "gatekeeper": {
+      "cli": "codex",
+      "model": "gpt-5.4",
+      "tag_display": "5.4"
+    },
+    "narrator": {
+      "cli": "claude",
+      "model": "claude-haiku-4-5",
+      "tag_display": "Haiku 4.5"
+    }
+  },
+  "tags": {
+    "meta": "[4CO-OP]",
+    "planner": "[🧠 Planner | {tag_display}]",
+    "builder": "[🛠️ Builder | {tag_display}]",
+    "spec_checker": "[✅ Spec Checker | {tag_display}]",
+    "escalation": "[🔎 Escalation | {tag_display}]",
+    "reviewer": "[👓 Reviewer | {tag_display}]",
+    "fixer": "[🔧 Fixer | {tag_display}]",
+    "gatekeeper": "[⚖️ Gatekeeper | {tag_display}]",
+    "narrator": "[4CO-OP]"
+  },
+  "monitor_window": {
+    "enabled": true,
+    "port": 0,
+    "auto_launch": true,
+    "browser": "auto"
+  },
+  "logging": {
+    "enabled": true,
+    "dir": ".4co-op/logs",
+    "snapshot_interval_seconds_active": 10,
+    "snapshot_interval_seconds_idle": 60
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tagged_message",
+    "plan_markdown",
+    "acceptance_checklist",
+    "file_structure_hint",
+    "definition_of_done"
+  ],
+  "properties": {
+    "tagged_message": { "type": "string" },
+    "plan_markdown": { "type": "string" },
+    "acceptance_checklist": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text", "status"],
+        "properties": {
+          "id": { "type": "string" },
+          "text": { "type": "string" },
+          "status": { "type": "string", "enum": ["pending"] }
+        }
+      }
+    },
+    "file_structure_hint": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "definition_of_done": { "type": "string" }
+  }
+}

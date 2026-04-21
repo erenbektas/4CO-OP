@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["tagged_message"],
+  "properties": {
+    "tagged_message": { "type": "string" },
+    "relay_prompt": { "type": "string" },
+    "summary_sentences": {
+      "type": "array",
+      "maxItems": 5,
+      "items": { "type": "string" }
+    },
+    "detected_stack": { "type": "string" },
+    "proposed_build": { "type": "string" },
+    "proposed_test": { "type": "string" },
+    "proposed_lint": { "type": "string" },
+    "confidence": { "type": "number" }
+  },
+  "additionalProperties": true
+}

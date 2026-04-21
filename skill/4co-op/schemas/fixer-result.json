@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "session_id",
+    "commits",
+    "fixed_issues",
+    "out_of_scope",
+    "build",
+    "tests",
+    "lint"
+  ],
+  "properties": {
+    "session_id": { "type": "string" },
+    "commits": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "fixed_issues": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "out_of_scope": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "build": { "type": "string" },
+    "tests": { "type": "string" },
+    "lint": { "type": "string" }
+  }
+}

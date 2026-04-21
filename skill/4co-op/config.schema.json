@@ -1,0 +1,147 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "4CO-OP Config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "models",
+    "tags",
+    "monitor_window",
+    "logging"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planner",
+        "builder",
+        "spec_checker",
+        "escalation",
+        "reviewer",
+        "fixer",
+        "gatekeeper",
+        "narrator"
+      ],
+      "properties": {
+        "planner": { "$ref": "#/definitions/modelConfig" },
+        "builder": { "$ref": "#/definitions/modelConfig" },
+        "spec_checker": { "$ref": "#/definitions/modelConfig" },
+        "escalation": { "$ref": "#/definitions/modelConfig" },
+        "reviewer": { "$ref": "#/definitions/modelConfig" },
+        "fixer": { "$ref": "#/definitions/modelConfig" },
+        "gatekeeper": { "$ref": "#/definitions/modelConfig" },
+        "narrator": { "$ref": "#/definitions/modelConfig" }
+      }
+    },
+    "tags": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "meta",
+        "planner",
+        "builder",
+        "spec_checker",
+        "escalation",
+        "reviewer",
+        "fixer",
+        "gatekeeper",
+        "narrator"
+      ],
+      "properties": {
+        "meta": { "type": "string", "minLength": 1 },
+        "planner": { "type": "string", "minLength": 1 },
+        "builder": { "type": "string", "minLength": 1 },
+        "spec_checker": { "type": "string", "minLength": 1 },
+        "escalation": { "type": "string", "minLength": 1 },
+        "reviewer": { "type": "string", "minLength": 1 },
+        "fixer": { "type": "string", "minLength": 1 },
+        "gatekeeper": { "type": "string", "minLength": 1 },
+        "narrator": { "type": "string", "minLength": 1 }
+      }
+    },
+    "monitor_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "port",
+        "auto_launch",
+        "browser"
+      ],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "auto_launch": { "type": "boolean" },
+        "browser": {
+          "type": "string",
+          "minLength": 1,
+          "default": "auto",
+          "description": "Browser launcher preference. Use 'auto' for cross-platform detection, 'system' to force the default URL opener, or a browser name/path such as edge, chrome, brave, or an executable path."
+        }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "dir",
+        "snapshot_interval_seconds_active",
+        "snapshot_interval_seconds_idle"
+      ],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "dir": { "type": "string", "minLength": 1 },
+        "snapshot_interval_seconds_active": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "snapshot_interval_seconds_idle": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "definitions": {
+    "modelConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cli",
+        "model",
+        "tag_display"
+      ],
+      "properties": {
+        "cli": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "context": {
+          "type": "string"
+        },
+        "tag_display": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

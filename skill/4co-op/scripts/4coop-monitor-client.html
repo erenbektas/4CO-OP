@@ -1,0 +1,901 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>4CO-OP Monitor</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --app-bg: #f2f0eb;
+      --window-bg: #fbfaf7;
+      --window-border: #cfc8bd;
+      --panel-border: #d8d2c8;
+      --text: #4f4e4c;
+      --muted: #8c8b88;
+      --shadow: 0 10px 24px rgba(46, 42, 34, 0.1);
+      --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+      --sans: "Segoe UI Variable Text", "Segoe UI", "Aptos", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: var(--app-bg);
+      color: var(--text);
+      font-family: var(--sans);
+    }
+
+    body {
+      padding: 20px;
+    }
+
+    .window {
+      width: min(720px, calc(100vw - 40px));
+      min-height: calc(100vh - 40px);
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      background: var(--window-bg);
+      border: 1px solid var(--window-border);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .window.open {
+      width: min(1240px, calc(100vw - 40px));
+    }
+
+    .titlebar {
+      height: 44px;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 16px;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--panel-border);
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #767472;
+    }
+
+    .titlebar-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .app-icon {
+      width: 20px;
+      height: 20px;
+      border-radius: 4px;
+      border: 1px solid #9aa7bc;
+      background:
+        linear-gradient(180deg, #7d93b4, #6d84a8);
+      position: relative;
+      flex: 0 0 auto;
+    }
+
+    .app-icon::before,
+    .app-icon::after {
+      content: "";
+      position: absolute;
+      background: rgba(255, 255, 255, 0.9);
+    }
+
+    .app-icon::before {
+      top: 4px;
+      left: 4px;
+      width: 4px;
+      height: 11px;
+      border-radius: 1px;
+    }
+
+    .app-icon::after {
+      top: 4px;
+      left: 10px;
+      width: 6px;
+      height: 6px;
+      border-radius: 1px;
+    }
+
+    .title {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .uptime {
+      white-space: nowrap;
+    }
+
+    .content {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .window.open .content {
+      grid-template-columns: 278px minmax(0, 1fr);
+    }
+
+    .sidebar {
+      min-width: 0;
+      padding: 12px 16px 14px;
+      overflow: auto;
+    }
+
+    .list-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1.7fr) 0.8fr 0.8fr 0.7fr 88px;
+      gap: 16px;
+      padding: 6px 14px 10px;
+      border-bottom: 1px solid var(--panel-border);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .rows {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .row {
+      width: 100%;
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1.7fr) 0.8fr 0.8fr 0.7fr 88px;
+      gap: 16px;
+      align-items: center;
+      padding: 10px 14px;
+      border: 1px solid transparent;
+      border-bottom: 1px solid #e4dfd6;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+      font: inherit;
+      transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+    }
+
+    .row.total {
+      margin-top: 6px;
+      border-top: 1px solid var(--panel-border);
+    }
+
+    .row.clickable {
+      cursor: pointer;
+    }
+
+    .row.clickable:hover {
+      background: rgba(93, 111, 139, 0.04);
+    }
+
+    .row.selected {
+      background: rgba(100, 128, 164, 0.06);
+    }
+
+    .row.selected::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border: 1px solid #9eb0c7;
+      border-radius: 4px;
+      pointer-events: none;
+    }
+
+    .row.active {
+      background: rgba(93, 111, 139, 0.04);
+    }
+
+    .row-stage {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--stage-accent);
+      flex: 0 0 auto;
+    }
+
+    .dot.active {
+      animation: pulse 1.1s ease-in-out infinite;
+      box-shadow: 0 0 0 5px var(--stage-ring);
+    }
+
+    .row-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 15px;
+      font-weight: 500;
+    }
+
+    .row-value {
+      font-family: var(--mono);
+      font-size: 14px;
+      white-space: nowrap;
+    }
+
+    .row-status {
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .status-badge,
+    .stage-pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 70px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--stage-border);
+      background: var(--stage-surface);
+      color: var(--stage-text);
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .status-badge.muted {
+      border-color: #d6d0c7;
+      background: #f5f3ef;
+      color: #8c867d;
+    }
+
+    .detail {
+      display: none;
+      min-width: 0;
+      padding: 18px 22px;
+      border-left: 1px solid var(--panel-border);
+      overflow: auto;
+    }
+
+    .window.open .detail {
+      display: block;
+    }
+
+    .detail-empty {
+      min-height: calc(100vh - 140px);
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      text-align: center;
+    }
+
+    .detail-header {
+      padding: 2px 0 14px;
+      border-bottom: 1px solid var(--panel-border);
+    }
+
+    .detail-title-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+
+    .detail-title {
+      margin: 0;
+      font-size: 21px;
+      font-weight: 600;
+      line-height: 1.2;
+    }
+
+    .detail-subtitle {
+      color: #7b7975;
+      font-size: 14px;
+    }
+
+    .token-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      padding: 18px 0;
+      border-bottom: 1px solid var(--panel-border);
+    }
+
+    .token-card {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 10px 16px;
+      border: 1px solid var(--panel-border);
+      border-radius: 4px;
+      background: #ffffff;
+      box-shadow: 0 2px 8px rgba(50, 44, 34, 0.04);
+    }
+
+    .token-label {
+      font-size: 14px;
+    }
+
+    .token-value {
+      font-family: var(--mono);
+      font-size: 18px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .detail-block {
+      padding-top: 16px;
+      border-bottom: 1px solid var(--panel-border);
+    }
+
+    .detail-block:last-child {
+      border-bottom: 0;
+    }
+
+    .detail-block-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .detail-block-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .detail-block-size {
+      color: #a6a39f;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+
+    .detail-toggle {
+      border: 1px solid #707884;
+      border-radius: 4px;
+      background: #7a818c;
+      color: #ffffff;
+      padding: 4px 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+
+    pre {
+      margin: 0 0 16px;
+      min-height: 82px;
+      max-height: 260px;
+      overflow: auto;
+      padding: 18px 20px;
+      border-radius: 4px;
+      background: #31353d;
+      color: #f5f5f4;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--mono);
+      font-size: 15px;
+      line-height: 1.55;
+    }
+
+    .window.open .list-head {
+      display: none;
+    }
+
+    .window.open .rows {
+      gap: 4px;
+    }
+
+    .window.open .row {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0;
+      padding: 8px 10px;
+      border-bottom: 1px solid #e8e3db;
+      border-radius: 4px;
+    }
+
+    .window.open .row-stage {
+      gap: 10px;
+    }
+
+    .window.open .row-value,
+    .window.open .row-status {
+      display: none;
+    }
+
+    .window.open .row.total {
+      margin-top: 12px;
+    }
+
+    @keyframes pulse {
+      0%, 100% {
+        transform: scale(1);
+      }
+      50% {
+        transform: scale(1.2);
+      }
+    }
+
+    @media (max-width: 1080px) {
+      .window.open {
+        width: min(980px, calc(100vw - 40px));
+      }
+
+      .window.open .content {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .detail {
+        border-left: 0;
+        border-top: 1px solid var(--panel-border);
+      }
+
+      .window.open .list-head {
+        display: grid;
+      }
+
+      .window.open .row {
+        grid-template-columns: minmax(0, 1.7fr) 0.8fr 0.8fr 0.7fr 88px;
+        gap: 16px;
+      }
+
+      .window.open .row-value,
+      .window.open .row-status {
+        display: block;
+      }
+
+      .window.open .row-status {
+        display: flex;
+      }
+    }
+
+    @media (max-width: 760px) {
+      body {
+        padding: 0;
+      }
+
+      .window,
+      .window.open {
+        width: 100vw;
+        min-height: 100vh;
+        border-radius: 0;
+        border-left: 0;
+        border-right: 0;
+      }
+
+      .titlebar {
+        grid-template-columns: auto minmax(0, 1fr);
+      }
+
+      .uptime {
+        display: none;
+      }
+
+      .list-head,
+      .row,
+      .window.open .row {
+        grid-template-columns: minmax(0, 1fr) 0.9fr 0.9fr 0.7fr;
+      }
+
+      .row-status {
+        display: none;
+      }
+
+      .token-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="window" id="window">
+    <header class="titlebar">
+      <div class="titlebar-left">
+        <span class="app-icon" aria-hidden="true"></span>
+        <span class="title" id="windowTitle">Monitor · Nightly/--</span>
+      </div>
+      <span class="uptime" id="uptime">uptime --</span>
+    </header>
+    <div class="content">
+      <section class="sidebar">
+        <div class="list-head">
+          <span>Stage</span>
+          <span>Tokens</span>
+          <span>Runtime</span>
+          <span>Calls</span>
+          <span></span>
+        </div>
+        <div class="rows" id="rows"></div>
+      </section>
+      <aside class="detail" id="detailPanel">
+        <div class="detail-empty" id="detailEmpty">Click a stage to inspect the latest call.</div>
+        <div id="detailContent" hidden>
+          <header class="detail-header">
+            <div class="detail-title-row">
+              <h2 class="detail-title" id="detailLabel"></h2>
+              <span class="stage-pill" id="detailPill"></span>
+            </div>
+            <div class="detail-subtitle" id="detailSubtitle"></div>
+          </header>
+          <div class="token-grid">
+            <section class="token-card">
+              <span class="token-label">Input Tokens</span>
+              <span class="token-value" id="detailInputTokens">0</span>
+            </section>
+            <section class="token-card">
+              <span class="token-label">Output Tokens</span>
+              <span class="token-value" id="detailOutputTokens">0</span>
+            </section>
+          </div>
+          <section class="detail-block">
+            <div class="detail-block-header">
+              <div class="detail-block-title">
+                <span>Input</span>
+                <span class="detail-block-size" id="detailInputSize">0 B</span>
+              </div>
+              <button class="detail-toggle" id="toggleInput" hidden>Show Full</button>
+            </div>
+            <pre id="detailInput"></pre>
+          </section>
+          <section class="detail-block">
+            <div class="detail-block-header">
+              <div class="detail-block-title">
+                <span>Output</span>
+                <span class="detail-block-size" id="detailOutputSize">0 B</span>
+              </div>
+              <button class="detail-toggle" id="toggleOutput" hidden>Show Full</button>
+            </div>
+            <pre id="detailOutput"></pre>
+          </section>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const STAGE_META = {
+      idle: { pill: 'Idle', accent: '#5c8e8b', ring: 'rgba(92, 142, 139, 0.2)', surface: '#f3f2ee', border: '#d5d0c7', text: '#75726b' },
+      planner: { pill: 'Plan', accent: '#596b84', ring: 'rgba(89, 107, 132, 0.2)', surface: '#e8edf5', border: '#9eb0c7', text: '#54677f' },
+      builder: { pill: 'Build', accent: '#596b84', ring: 'rgba(89, 107, 132, 0.2)', surface: '#e8edf5', border: '#9eb0c7', text: '#54677f' },
+      spec_checker: { pill: 'Spec', accent: '#6e92a7', ring: 'rgba(110, 146, 167, 0.2)', surface: '#dfeaf0', border: '#9eb8c8', text: '#557487' },
+      escalation: { pill: 'Escalate', accent: '#596b84', ring: 'rgba(89, 107, 132, 0.2)', surface: '#e8edf5', border: '#9eb0c7', text: '#54677f' },
+      reviewer: { pill: 'Review', accent: '#596b84', ring: 'rgba(89, 107, 132, 0.2)', surface: '#e8edf5', border: '#9eb0c7', text: '#54677f' },
+      fixer: { pill: 'Fix', accent: '#596b84', ring: 'rgba(89, 107, 132, 0.2)', surface: '#e8edf5', border: '#9eb0c7', text: '#54677f' },
+      gatekeeper: { pill: 'Gate', accent: '#596b84', ring: 'rgba(89, 107, 132, 0.2)', surface: '#e8edf5', border: '#9eb0c7', text: '#54677f' },
+      narrator: { pill: 'Haiku', accent: '#596b84', ring: 'rgba(89, 107, 132, 0.2)', surface: '#e8edf5', border: '#9eb0c7', text: '#54677f' },
+      total: { pill: 'Total', accent: '#596b84', ring: 'rgba(89, 107, 132, 0.2)', surface: '#f3f2ee', border: '#d5d0c7', text: '#75726b' }
+    }
+
+    const numberFormatter = new Intl.NumberFormat('en-US')
+    const preferredSelection = new URLSearchParams(window.location.search).get('select')
+    const WINDOW_VIEWPORT_WIDTH = {
+      closed: 760,
+      open: 1280
+    }
+    const state = {
+      rows: [],
+      selected: null,
+      fullInput: false,
+      fullOutput: false,
+      updatedAt: null,
+      startedAt: null
+    }
+    let lastOpenState = null
+
+    const windowEl = document.getElementById('window')
+    const rowsEl = document.getElementById('rows')
+    const windowTitleEl = document.getElementById('windowTitle')
+    const uptimeEl = document.getElementById('uptime')
+    const detailPanelEl = document.getElementById('detailPanel')
+    const detailEmptyEl = document.getElementById('detailEmpty')
+    const detailContentEl = document.getElementById('detailContent')
+    const detailLabelEl = document.getElementById('detailLabel')
+    const detailPillEl = document.getElementById('detailPill')
+    const detailSubtitleEl = document.getElementById('detailSubtitle')
+    const detailInputTokensEl = document.getElementById('detailInputTokens')
+    const detailOutputTokensEl = document.getElementById('detailOutputTokens')
+    const detailInputSizeEl = document.getElementById('detailInputSize')
+    const detailOutputSizeEl = document.getElementById('detailOutputSize')
+    const detailInputEl = document.getElementById('detailInput')
+    const detailOutputEl = document.getElementById('detailOutput')
+    const toggleInputEl = document.getElementById('toggleInput')
+    const toggleOutputEl = document.getElementById('toggleOutput')
+
+    function getStageMeta(key) {
+      return STAGE_META[key] ?? STAGE_META.idle
+    }
+
+    function applyStageTheme(element, key) {
+      const meta = getStageMeta(key)
+      element.style.setProperty('--stage-accent', meta.accent)
+      element.style.setProperty('--stage-ring', meta.ring)
+      element.style.setProperty('--stage-surface', meta.surface)
+      element.style.setProperty('--stage-border', meta.border)
+      element.style.setProperty('--stage-text', meta.text)
+    }
+
+    function formatTokens(value, exact = true) {
+      const rendered = numberFormatter.format(Number(value ?? 0))
+      return exact === false ? `~${rendered}` : rendered
+    }
+
+    function formatRuntime(ms) {
+      const totalMs = Number(ms ?? 0)
+      if (totalMs <= 0) {
+        return '0:00'
+      }
+      const totalSeconds = Math.floor(totalMs / 1000)
+      const minutes = Math.floor(totalSeconds / 60)
+      const seconds = totalSeconds % 60
+      const hours = Math.floor(minutes / 60)
+      if (hours > 0) {
+        return `${hours}:${String(minutes % 60).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+      }
+      return `${minutes}:${String(seconds).padStart(2, '0')}`
+    }
+
+    function formatClock(value) {
+      if (!value) return '--:--:--'
+      return new Date(value).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      })
+    }
+
+    function formatWindowDate(value) {
+      const date = value ? new Date(value) : new Date()
+      return date.toISOString().slice(0, 10)
+    }
+
+    function formatUptime(startedAt) {
+      if (!startedAt) {
+        return 'uptime: --'
+      }
+      const totalSeconds = Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000))
+      const hours = Math.floor(totalSeconds / 3600)
+      const minutes = Math.floor((totalSeconds % 3600) / 60)
+      const seconds = totalSeconds % 60
+      return `uptime: ${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+    }
+
+    function measureBytes(text) {
+      return new TextEncoder().encode(String(text ?? '')).length
+    }
+
+    function formatBytes(bytes) {
+      if (!bytes) return '0 B'
+      if (bytes < 1024) return `${bytes} B`
+      const kb = bytes / 1024
+      if (kb < 1024) return `${kb.toFixed(kb >= 10 ? 0 : 1)} KB`
+      const mb = kb / 1024
+      return `${mb.toFixed(mb >= 10 ? 0 : 1)} MB`
+    }
+
+    function getDetailCall(row) {
+      if (!row) return null
+      if (row.last_call) return row.last_call
+      if (row.current_call) {
+        return {
+          started_at: row.current_call.started_at,
+          ended_at: null,
+          input_tokens: Number(row.current_call.input_tokens ?? 0),
+          output_tokens: 0,
+          input_full: row.current_call.input ?? '',
+          output_full: '',
+          input_preview: row.current_call.input ?? '',
+          output_preview: '',
+          input_truncated: false,
+          output_truncated: false
+        }
+      }
+      return null
+    }
+
+    function updateChrome() {
+      windowTitleEl.textContent = `Monitor · Nightly/${formatWindowDate(state.startedAt || state.updatedAt)}`
+      uptimeEl.textContent = formatUptime(state.startedAt)
+    }
+
+    function syncWindowBounds(isOpen) {
+      if (typeof window.resizeTo !== 'function') {
+        return
+      }
+      if (lastOpenState === isOpen) {
+        return
+      }
+      lastOpenState = isOpen
+
+      const chromeWidth = Math.max(0, window.outerWidth - window.innerWidth)
+      const targetWidth = WINDOW_VIEWPORT_WIDTH[isOpen ? 'open' : 'closed'] + chromeWidth
+      const centerX = window.screenX + (window.outerWidth / 2)
+      const nextLeft = Math.max(0, Math.round(centerX - (targetWidth / 2)))
+      const targetHeight = window.outerHeight
+
+      window.requestAnimationFrame(() => {
+        try {
+          window.resizeTo(targetWidth, targetHeight)
+          if (typeof window.moveTo === 'function') {
+            window.moveTo(nextLeft, window.screenY)
+          }
+        } catch {}
+      })
+    }
+
+    function renderRows() {
+      rowsEl.innerHTML = ''
+      state.rows.forEach(row => {
+        const button = document.createElement('button')
+        const isInteractive = row.key !== 'total' && Boolean(getDetailCall(row))
+        const activeBadge = row.active ? '<span class="status-badge">Active</span>' : (row.key === 'total' ? '<span class="status-badge muted">Total</span>' : '')
+        button.className = `row ${row.key === 'total' ? 'total' : ''} ${row.active ? 'active' : ''} ${state.selected === row.key ? 'selected' : ''} ${isInteractive ? 'clickable' : ''}`
+        button.type = 'button'
+        button.disabled = !isInteractive
+        applyStageTheme(button, row.key)
+        button.innerHTML = `
+          <span class="row-stage">
+            <span class="dot ${row.active ? 'active' : ''}"></span>
+            <span class="row-label">${row.label}</span>
+          </span>
+          <span class="row-value">${formatTokens(row.tokens, row.exact_tokens)}</span>
+          <span class="row-value">${formatRuntime(row.runtime_ms)}</span>
+          <span class="row-value">${numberFormatter.format(row.calls ?? 0)}</span>
+          <span class="row-status">${activeBadge}</span>
+        `
+        if (isInteractive) {
+          button.addEventListener('click', () => toggleSelection(row.key))
+        }
+        rowsEl.appendChild(button)
+      })
+      updateChrome()
+    }
+
+    function renderDetails() {
+      const row = state.rows.find(entry => entry.key === state.selected)
+      const call = getDetailCall(row)
+      if (!row || !call) {
+        state.selected = null
+        windowEl.classList.remove('open')
+        detailPanelEl.hidden = true
+        detailEmptyEl.hidden = false
+        detailContentEl.hidden = true
+        syncWindowBounds(false)
+        return
+      }
+
+      windowEl.classList.add('open')
+      detailPanelEl.hidden = false
+      detailEmptyEl.hidden = true
+      detailContentEl.hidden = false
+      syncWindowBounds(true)
+
+      const inputText = state.fullInput ? call.input_full : call.input_preview
+      const outputText = state.fullOutput ? call.output_full : call.output_preview
+
+      detailLabelEl.textContent = row.label
+      detailPillEl.textContent = getStageMeta(row.key).pill
+      applyStageTheme(detailPillEl, row.key)
+      detailSubtitleEl.textContent = call.ended_at
+        ? `Last call ${formatClock(call.ended_at)}`
+        : `Running now · started ${formatClock(call.started_at)}`
+
+      detailInputTokensEl.textContent = formatTokens(call.input_tokens)
+      detailOutputTokensEl.textContent = formatTokens(call.output_tokens)
+      detailInputSizeEl.textContent = formatBytes(measureBytes(call.input_full))
+      detailOutputSizeEl.textContent = formatBytes(measureBytes(call.output_full))
+      detailInputEl.textContent = inputText || 'No input captured yet.'
+      detailOutputEl.textContent = outputText || (call.ended_at ? 'No output captured yet.' : 'Output will appear when this call finishes.')
+
+      toggleInputEl.hidden = !call.input_truncated
+      toggleOutputEl.hidden = !call.output_truncated
+      toggleInputEl.textContent = state.fullInput ? 'Show Less' : 'Show Full'
+      toggleOutputEl.textContent = state.fullOutput ? 'Show Less' : 'Show Full'
+    }
+
+    function toggleSelection(key) {
+      if (state.selected === key) {
+        state.selected = null
+        state.fullInput = false
+        state.fullOutput = false
+      } else {
+        state.selected = key
+        state.fullInput = false
+        state.fullOutput = false
+      }
+      renderRows()
+      renderDetails()
+    }
+
+    toggleInputEl.addEventListener('click', () => {
+      state.fullInput = !state.fullInput
+      renderDetails()
+    })
+
+    toggleOutputEl.addEventListener('click', () => {
+      state.fullOutput = !state.fullOutput
+      renderDetails()
+    })
+
+    function applyState(payload) {
+      state.rows = payload.rows || []
+      state.updatedAt = payload.updated_at || null
+      state.startedAt = payload.started_at || state.startedAt || payload.updated_at || null
+      if (!state.selected && preferredSelection) {
+        const preferredRow = state.rows.find(row => row.key === preferredSelection)
+        if (preferredRow && getDetailCall(preferredRow)) {
+          state.selected = preferredSelection
+        }
+      }
+      if (state.selected) {
+        const selectedRow = state.rows.find(row => row.key === state.selected)
+        if (!selectedRow || !getDetailCall(selectedRow)) {
+          state.selected = null
+        }
+      }
+      renderRows()
+      renderDetails()
+    }
+
+    async function loadInitialState() {
+      try {
+        const response = await fetch('/state')
+        if (!response.ok) return
+        applyState(await response.json())
+      } catch {}
+    }
+
+    function connectEvents() {
+      const events = new EventSource('/events')
+      events.addEventListener('metrics', event => {
+        applyState(JSON.parse(event.data))
+      })
+      events.onmessage = event => {
+        applyState(JSON.parse(event.data))
+      }
+      events.onerror = () => {
+        events.close()
+        setTimeout(connectEvents, 1500)
+      }
+    }
+
+    renderRows()
+    renderDetails()
+    loadInitialState()
+    connectEvents()
+    window.setInterval(updateChrome, 1000)
+  </script>
+</body>
+</html>

@@ -1,0 +1,58 @@
+name: Cross Platform
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Syntax Check
+        run: |
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs'
+          import path from 'node:path'
+          import { execFileSync } from 'node:child_process'
+
+          const roots = ['scripts', path.join('skill', '4co-op', 'scripts')]
+          for (const root of roots) {
+            for (const name of fs.readdirSync(root)) {
+              if (!name.endsWith('.mjs')) {
+                continue
+              }
+              execFileSync(process.execPath, ['--check', path.join(root, name)], { stdio: 'inherit' })
+            }
+          }
+          NODE
+
+      - name: Browser Launch Plan Tests
+        run: node --test tests/monitor-spawn.test.mjs
+
+      - name: Global Install Dry Run
+        run: node scripts/install-4coop.mjs --global --host both --dry-run
+
+      - name: Project Install Dry Run
+        run: node scripts/install-4coop.mjs --project ./ci-project --dry-run
+
+      - name: Source Wrapper Dry Run
+        run: node scripts/4coop.mjs clean -- --dry-run
