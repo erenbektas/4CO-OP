@@ -321,7 +321,8 @@ skill/4co-op/
 │       ├── <stage>-NN.ndjson          # raw --json stream for each stage call
 │       └── <stage>-NN-last-message.txt
 ├── logs/                        # nightly event log (see docs/privacy.md)
-├── worktrees/                   # managed throwaway worktrees
+├── worktrees/                   # scaffolded placeholder dir; actual worktrees are
+│                                # project siblings at ../<repo-name>-wt-<slug> (see §3)
 ├── monitor.port                 # port of the running tracker server, if any
 ├── pipeline.lock                # { run_id, feature, started_at } — presence = run active
 └── pipeline-queue.json          # [{ feature, requested_at }, …]

@@ -85,16 +85,15 @@ What happens if deleted:
 
 ### `.4co-op/worktrees/`
 
-Git worktrees created for isolated implementation work.
+Scaffolded placeholder directory. Managed git worktrees are currently created
+as project siblings at `../<repo-name>-wt-<slug>` (see `buildWorktreeInfo` in
+`skill/4co-op/scripts/4coop-worktree.mjs`), not inside this directory. The real
+path used for a given run is stored in `state.worktree.path` inside that run's
+`state.json`, and the `clean` command sweeps based on that value.
 
 Safe to delete:
 
-- not while a run is still using them
-- otherwise yes, but use the `clean` command when possible
-
-What happens if deleted:
-
-- in-progress branch/worktree state can break if you remove an active worktree manually
+- yes; scaffold recreates it on the next install/run
 
 ### `.4co-op/4coop-active.json`
 
@@ -170,7 +169,7 @@ Delete:
 
 - `.4co-op/runs/`
 - `.4co-op/logs/`
-- stale `.4co-op/worktrees/` if they are no longer active
+- stale `../<repo-name>-wt-<slug>` sibling directories (the actual worktrees) if the matching run's PR is already merged or closed; prefer `clean` for this
 
 Or use:
 
