@@ -316,10 +316,10 @@ skill/4co-op/
 │       ├── plan.md
 │       ├── review.md
 │       ├── reviewer-input.md    # `gh pr diff` dump for the reviewer
-│       ├── relay/               # stage-to-stage relay prompts
-│       ├── raw/                 # raw per-stage outputs
-│       ├── <stage>-NN.ndjson          # raw --json stream for each stage call
-│       └── <stage>-NN-last-message.txt
+│       ├── relay/               # stage-to-stage relay prompts (4coop-relay.mjs)
+│       ├── raw/                 # scaffolded placeholder dir; currently unused
+│       ├── <stage>-NN.ndjson          # codex stages only: raw --json stream per call
+│       └── <stage>-NN-last-message.txt # codex stages only: last model message per call
 ├── logs/                        # nightly event log (see docs/privacy.md)
 ├── worktrees/                   # scaffolded placeholder dir; actual worktrees are
 │                                # project siblings at ../<repo-name>-wt-<slug> (see §3)
