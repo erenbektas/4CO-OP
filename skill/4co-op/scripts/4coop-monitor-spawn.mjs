@@ -333,8 +333,30 @@ export async function ensureMonitor(paths, config, initialState) {
   const scriptPath = resolveBundledPath('scripts', '4coop-monitor-server.mjs')
   const child = spawn(process.execPath, [scriptPath, '--port', String(port)], {
     detached: true,
-    stdio: 'ignore'
+    stdio: ['ignore', 'ignore', 'pipe']
   })
+
+  await new Promise((resolve, reject) => {
+    const onData = (chunk) => {
+      const text = chunk.toString()
+      if (text.includes('[monitor] listening')) {
+        child.stderr.off('data', onData)
+        resolve()
+      } else if (/EADDRINUSE|EACCES|listen failed/.test(text)) {
+        child.stderr.off('data', onData)
+        reject(new Error(`Monitor failed to start: ${text.trim()}`))
+      }
+    }
+    child.stderr.on('data', onData)
+    child.once('exit', (code) => {
+      reject(new Error(`Monitor exited with code ${code} before listening`))
+    })
+    const timer = setTimeout(() => {
+      reject(new Error('Monitor startup timeout'))
+    }, 5000)
+    timer.unref()
+  })
+
   child.unref()
 
   const healthy = await waitForHealth(port)
