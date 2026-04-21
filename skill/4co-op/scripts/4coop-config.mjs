@@ -140,10 +140,33 @@ export function loadProjectCommands(projectConfigPath) {
   }
 }
 
+export function validateProjectCommands(projectCommands) {
+  const errors = []
+  if (!projectCommands) {
+    errors.push('missing project commands')
+    return errors
+  }
+
+  for (const key of ['build', 'test', 'lint']) {
+    if (typeof projectCommands[key] !== 'string') {
+      errors.push(`${key} must be a string`)
+    }
+  }
+
+  if (!String(projectCommands.build ?? '').trim()) {
+    errors.push('build command cannot be empty')
+  }
+  if (!String(projectCommands.lint ?? '').trim()) {
+    errors.push('lint command cannot be empty')
+  }
+
+  return errors
+}
+
 export function projectCommandsReady(projectCommands) {
   return Boolean(projectCommands) &&
     projectCommands.confirmed === true &&
-    ['build', 'test', 'lint'].every(key => typeof projectCommands[key] === 'string')
+    validateProjectCommands(projectCommands).length === 0
 }
 
 function summarizeNodeProject(packageJsonPath) {

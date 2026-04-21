@@ -18,6 +18,7 @@ import {
   approvalPrompt,
   awaitingPrompt,
   configHelp,
+  configRequirements,
   configProposal,
   halted,
   mergeReadyHint,
@@ -36,7 +37,8 @@ import {
   loadConfig,
   loadProjectCommands,
   projectCommandsReady,
-  proposeProjectCommands
+  proposeProjectCommands,
+  validateProjectCommands
 } from './4coop-config.mjs'
 import {
   acquireLock,
@@ -573,8 +575,47 @@ function summarizePlanFallback(config, planMarkdown, planPath) {
     .filter(Boolean)
     .slice(0, 5)
     .join(' ')
-  const relativePlanPath = path.isAbsolute(planPath) ? planPath : planPath
-  return withTag(config, 'planner', `${summary || 'Plan ready.'} (plan: ${relativePlanPath})`)
+  const planReference = path.isAbsolute(planPath)
+    ? toMarkdownFileLink(planPath, 'full plan')
+    : String(planPath ?? '').trim() || 'full plan'
+  return withTag(config, 'planner', `${summary || 'Plan ready.'} Full plan: ${planReference}`)
+}
+
+function toMarkdownFileLink(absolutePath, label) {
+  const normalized = String(absolutePath ?? '').replace(/\\/g, '/')
+  if (!normalized) {
+    return label
+  }
+  return `[${label}](/${normalized})`
+}
+
+function finalizePlannerSummaryMessage(config, structured, planPathAbsolute, fallbackPlanPath) {
+  const plannerTag = config.tags.planner.replace('{tag_display}', config.models.planner.tag_display)
+  const summary = Array.isArray(structured?.summary_sentences)
+    ? structured.summary_sentences.filter(Boolean).slice(0, 5).join(' ')
+    : ''
+  const messageBody = summary || stripLeadingTag(structured?.tagged_message) || 'Plan ready.'
+  const planReference = planPathAbsolute ? toMarkdownFileLink(planPathAbsolute, 'full plan') : fallbackPlanPath
+  return `${plannerTag}: ${messageBody} Full plan: ${planReference}`
+}
+
+function buildPlannerRetryPrompt(config, featureRequest, previousOutput = '') {
+  const basePrompt = buildPlannerPrompt(config, featureRequest)
+  const instructions = [
+    '',
+    'Your previous reply did not match the required JSON shape.',
+    'Retry now and return exactly one JSON object.',
+    'Do not include markdown fences or any prose before or after the JSON.',
+    'Make sure tagged_message, plan_markdown, acceptance_checklist, file_structure_hint, and definition_of_done are all present.'
+  ]
+  if (previousOutput.trim()) {
+    instructions.push('', 'Previous invalid reply:', previousOutput.trim())
+  }
+  return `${basePrompt}${instructions.join('\n')}`
+}
+
+function isStageSchemaError(error, stage) {
+  return error?.name === 'StageSchemaError' && error?.stage === stage
 }
 
 function fallbackStatusMessage(config, stage, payload = {}) {
@@ -791,13 +832,20 @@ async function runNarrator({
     if (mode === 'relay') {
       return result.structured.relay_prompt || payload.preferred_prompt
     }
+    if (mode === 'planner-summary') {
+      return finalizePlannerSummaryMessage(config, result.structured, payload.plan_absolute_path, payload.plan_path)
+    }
     return ensureTagged(config, targetStage, result.structured.tagged_message)
   } catch {
     if (mode === 'relay') {
       return payload.preferred_prompt
     }
     if (mode === 'planner-summary') {
-      return summarizePlanFallback(config, payload.plan_markdown, payload.plan_path)
+      return summarizePlanFallback(
+        config,
+        payload.plan_markdown,
+        payload.plan_absolute_path ?? payload.plan_path
+      )
     }
     return fallbackStatusMessage(config, targetStage, payload)
   }
@@ -808,6 +856,8 @@ function buildPlannerPrompt(config, featureRequest) {
   return [
     'You are the 4CO-OP Planner.',
     'Inspect the repository and produce a concrete implementation plan.',
+    'Return exactly one JSON object and nothing else.',
+    'Do not use markdown fences.',
     'Return only JSON with these keys:',
     '{"tagged_message":"","plan_markdown":"","acceptance_checklist":[{"id":"AC-001","text":"","status":"pending"}],"file_structure_hint":[""],"definition_of_done":""}',
     `tagged_message must start exactly with "${plannerTag}:"`,
@@ -1105,17 +1155,38 @@ async function handleStart(projectRoot, feature, options = {}) {
   try {
     const plannerRelay = createPlannerRelayPrompt(feature)
     writeRelayFile(paths, 'relay-to-planner.txt', plannerRelay)
-    const plannerResult = await runTrackedStage({
-      stage: 'planner',
-      config,
-      prompt: buildPlannerPrompt(config, feature),
-      cwd: projectRoot,
-      paths,
-      state,
-      logger,
-      monitorState,
-      monitorPort: monitor.port
-    })
+    let plannerResult
+    let plannerParseRetried = false
+    try {
+      plannerResult = await runTrackedStage({
+        stage: 'planner',
+        config,
+        prompt: buildPlannerPrompt(config, feature),
+        cwd: projectRoot,
+        paths,
+        state,
+        logger,
+        monitorState,
+        monitorPort: monitor.port
+      })
+    } catch (error) {
+      if (!isStageSchemaError(error, 'planner')) {
+        throw error
+      }
+      plannerParseRetried = true
+      messages.push(withTag(config, 'meta', 'The planner stage failed to parse its output. Let me retry.'))
+      plannerResult = await runTrackedStage({
+        stage: 'planner',
+        config,
+        prompt: buildPlannerRetryPrompt(config, feature, error.outputText ?? error.stdout ?? ''),
+        cwd: projectRoot,
+        paths,
+        state,
+        logger,
+        monitorState,
+        monitorPort: monitor.port
+      })
+    }
 
     fs.writeFileSync(paths.planFile, `${plannerResult.structured.plan_markdown}\n`, 'utf8')
     state.status = 'awaiting_approval'
@@ -1132,7 +1203,8 @@ async function handleStart(projectRoot, feature, options = {}) {
       targetStage: 'planner',
       payload: {
         plan_markdown: plannerResult.structured.plan_markdown,
-        plan_path: state.plan.path
+        plan_path: state.plan.path,
+        plan_absolute_path: paths.planFile
       },
       config,
       paths,
@@ -1687,6 +1759,20 @@ async function handleConfigConfirm(projectRoot, answer) {
     return {
       status: 'awaiting_config_confirm',
       messages: [configHelp(config)]
+    }
+  }
+
+  const commandErrors = validateProjectCommands(parsed.commands)
+  if (commandErrors.length > 0) {
+    const missingKeys = commandErrors
+      .filter(item => item.endsWith('cannot be empty'))
+      .map(item => item.split(' ')[0])
+    return {
+      status: 'awaiting_config_confirm',
+      messages: [
+        configRequirements(config, missingKeys.length > 0 ? missingKeys : ['build', 'lint']),
+        configHelp(config)
+      ]
     }
   }
 

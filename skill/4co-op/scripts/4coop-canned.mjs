@@ -32,6 +32,17 @@ export function configHelp(config) {
   )
 }
 
+export function configRequirements(config, missingKeys) {
+  const fields = missingKeys.length > 1
+    ? `${missingKeys.slice(0, -1).join(', ')} and ${missingKeys.at(-1)}`
+    : missingKeys[0]
+  return withTag(
+    config,
+    'meta',
+    `${fields} cannot be empty. Please reply "edit: build=... test=... lint=...", or "cancel".`
+  )
+}
+
 export function queued(config, currentFeature, position) {
   return withTag(config, 'meta', `Queued behind ${currentFeature} (position ${position})`)
 }
@@ -49,9 +60,14 @@ export function configProposal(config, proposal) {
     `[4CO-OP]: ${proposal.summary}`,
     `  build = ${proposal.proposed_build || '(empty)'}`,
     `  test  = ${proposal.proposed_test || '(empty)'}`,
-    `  lint  = ${proposal.proposed_lint || '(empty)'}`,
-    'Reply "ok", or "no tests", or "edit: build=... test=... lint=...", or "cancel".'
+    `  lint  = ${proposal.proposed_lint || '(empty)'}`
   ]
+  if (!proposal.proposed_build || !proposal.proposed_lint) {
+    lines.push('Build and lint must be set before the pipeline can continue. Test may be empty if the project has no tests.')
+  }
+  lines.push(
+    'Reply "ok", or "no tests", or "edit: build=... test=... lint=...", or "cancel".'
+  )
   return lines.join('\n')
 }
 

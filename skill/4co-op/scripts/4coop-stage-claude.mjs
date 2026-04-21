@@ -26,31 +26,54 @@ function parseEnvelope(stdout) {
   }
 }
 
+function collectNestedCandidates(value, seen = new Set()) {
+  if (value === undefined || value === null) {
+    return []
+  }
+  if (typeof value === 'string') {
+    return [value]
+  }
+  if (typeof value !== 'object') {
+    return []
+  }
+  if (seen.has(value)) {
+    return []
+  }
+  seen.add(value)
+
+  const candidates = [value]
+  if (Array.isArray(value)) {
+    const joined = value
+      .map(item => typeof item === 'string' ? item : item?.text)
+      .filter(Boolean)
+      .join('\n')
+      .trim()
+    if (joined) {
+      candidates.push(joined)
+    }
+    for (const item of value) {
+      candidates.push(...collectNestedCandidates(item, seen))
+    }
+    return candidates
+  }
+
+  for (const key of ['result', 'response', 'output', 'message', 'content', 'text']) {
+    if (key in value) {
+      candidates.push(...collectNestedCandidates(value[key], seen))
+    }
+  }
+
+  return candidates
+}
+
 function extractOutputText(envelope, stdout) {
   if (!envelope) {
     return stdout.trim()
   }
 
-  const candidates = [
-    envelope.result,
-    envelope.output,
-    envelope.message,
-    envelope.content,
-    envelope.response
-  ]
-
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string') {
+  for (const candidate of collectNestedCandidates(envelope)) {
+    if (typeof candidate === 'string' && candidate.trim()) {
       return candidate.trim()
-    }
-    if (Array.isArray(candidate)) {
-      const joined = candidate
-        .map(item => typeof item === 'string' ? item : item?.text)
-        .filter(Boolean)
-        .join('\n')
-      if (joined) {
-        return joined.trim()
-      }
     }
   }
 
@@ -77,11 +100,9 @@ function extractUsage(envelope, prompt, outputText) {
   }
 }
 
-function extractStructured(stage, envelope, outputText) {
+export function extractStructuredPayload(stage, envelope, outputText) {
   const candidates = [
-    envelope?.result,
-    envelope?.response,
-    envelope?.output,
+    ...collectNestedCandidates(envelope),
     outputText
   ]
 
@@ -142,7 +163,19 @@ export async function runClaudeStage({
       const envelope = parseEnvelope(stdout)
       const outputText = extractOutputText(envelope, stdout)
       const usage = extractUsage(envelope, prompt, outputText)
-      const structured = extractStructured(stage, envelope, outputText)
+      let structured
+      try {
+        structured = extractStructuredPayload(stage, envelope, outputText)
+      } catch (error) {
+        const wrapped = new Error(error.message)
+        wrapped.name = 'StageSchemaError'
+        wrapped.stage = stage
+        wrapped.outputText = outputText
+        wrapped.stdout = stdout
+        wrapped.stderr = stderr
+        reject(wrapped)
+        return
+      }
 
       resolve({
         exitCode,
