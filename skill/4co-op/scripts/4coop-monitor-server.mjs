@@ -44,20 +44,22 @@ const MAX_CALL_TOTAL_BYTES = 200000
 function sanitizeCall(call) {
   if (call == null || typeof call !== 'object') return undefined
   try {
-    const truncated = JSON.parse(JSON.stringify(call), (_key, value) => {
+    // Use a replacer so strings are capped before entering the output buffer —
+    // avoids duplicating large strings during the intermediate stringify pass.
+    const json = JSON.stringify(call, (_key, value) => {
       if (typeof value === 'string' && value.length > MAX_CALL_STRING_LEN) {
         return `${value.slice(0, MAX_CALL_STRING_LEN)}…[truncated ${value.length - MAX_CALL_STRING_LEN} chars]`
       }
       return value
     })
-    if (JSON.stringify(truncated).length > MAX_CALL_TOTAL_BYTES) {
+    if (!json || json.length > MAX_CALL_TOTAL_BYTES) {
       return {
         _truncated: true,
-        started_at: typeof truncated.started_at === 'string' ? truncated.started_at : undefined,
-        ended_at: typeof truncated.ended_at === 'string' ? truncated.ended_at : undefined
+        started_at: typeof call.started_at === 'string' ? call.started_at : undefined,
+        ended_at: typeof call.ended_at === 'string' ? call.ended_at : undefined
       }
     }
-    return truncated
+    return JSON.parse(json)
   } catch {
     return undefined
   }
