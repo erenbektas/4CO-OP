@@ -339,7 +339,18 @@ export async function ensureMonitor(paths, config, initialState) {
 
   const healthy = await waitForHealth(port)
   if (!healthy) {
-    throw new Error(`Monitor server did not become healthy on port ${port}`)
+    // Check if the server wrote a listen-error state file before dying
+    const errorFile = path.join(paths.runtimeDir, '.monitor-listen-error.json')
+    let cause = `Monitor server did not become healthy on port ${port}`
+    if (pathExists(errorFile)) {
+      try {
+        const detail = JSON.parse(fs.readFileSync(errorFile, 'utf8'))
+        cause = `Monitor listen failed on port ${detail.port ?? port}: ${detail.code} (${detail.message})`
+        // Clean up so stale errors don't confuse next launch
+        fs.unlinkSync(errorFile)
+      } catch { /* fall through with generic message */ }
+    }
+    throw new Error(cause)
   }
 
   ensureDir(path.dirname(paths.monitorPortFile))

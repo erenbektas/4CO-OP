@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import path from 'node:path'
 import http from 'node:http'
 import { URL } from 'node:url'
 import { resolveBundledPath } from './4coop-paths.mjs'
@@ -177,9 +178,34 @@ const server = http.createServer(async (request, response) => {
   sendJson(response, 404, { ok: false, error: 'Not found' })
 })
 
-server.on('error', (err) => {
-  console.error('[monitor] listen failed:', err.code || err.message)
-  process.exit(1)
+// One-shot error handler for listen-time failures only.
+// Removed on successful listen so transient post-listen errors don't crash the server.
+function handleListenError(err) {
+  // Write failure details to a state file so the parent process (which spawns
+  // with stdio:'ignore') can surface the real cause instead of a generic
+  // "did not become healthy" timeout. Written to .4co-op/ runtime dir.
+  const failure = {
+    code: err.code || 'UNKNOWN',
+    message: err.message,
+    port: args.port,
+    timestamp: new Date().toISOString(),
+  }
+  try {
+    const errorLogFile = path.join(process.cwd(), '.4co-op', '.monitor-listen-error.json')
+    fs.mkdirSync(path.dirname(errorLogFile), { recursive: true })
+    fs.writeFileSync(errorLogFile, JSON.stringify(failure), 'utf8')
+  } catch { /* best-effort; console.error below is secondary */ }
+
+  console.error('[monitor] listen failed on port', args.port, ':', failure.code)
+  process.exitCode = 1
+}
+
+server.on('error', handleListenError)
+
+server.once('listening', () => {
+  // Listen succeeded — remove the one-shot handler so post-listen errors
+  // (e.g. ECONNRESET) don't kill the running server.
+  server.removeListener('error', handleListenError)
 })
 
 server.listen(args.port, '127.0.0.1')
