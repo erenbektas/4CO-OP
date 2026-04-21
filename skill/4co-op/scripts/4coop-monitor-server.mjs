@@ -38,12 +38,28 @@ function isLoopbackRequest(request) {
   return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.socket.remoteAddress)
 }
 
+function sanitizeRows(rows) {
+  if (!Array.isArray(rows)) return []
+  return rows.map(row => ({
+    key: String(row.key ?? ''),
+    label: String(row.label ?? ''),
+    tokens: Number(row.tokens) || 0,
+    exact_tokens: Boolean(row.exact_tokens),
+    runtime_ms: Number(row.runtime_ms) || 0,
+    calls: Number(row.calls) || 0,
+    active: Boolean(row.active)
+  }))
+}
+
 function updateStateFromPayload(parsed) {
   const previousStartedAt = state.started_at ?? new Date().toISOString()
   if (parsed.state) {
     state = parsed.state
   } else {
     state = parsed
+  }
+  if (state.rows !== undefined) {
+    state.rows = sanitizeRows(state.rows)
   }
   state.started_at = state.started_at ?? previousStartedAt
   state.updated_at = state.updated_at ?? new Date().toISOString()
@@ -141,6 +157,16 @@ const server = http.createServer(async (request, response) => {
     try {
       const body = await readBody(request)
       const parsed = JSON.parse(body)
+      const rawRows = parsed.state ? parsed.state.rows : parsed.rows
+      if (rawRows !== undefined && Array.isArray(rawRows)) {
+        const badRow = rawRows.find(
+          row => typeof row.key !== 'string' || typeof row.label !== 'string'
+        )
+        if (badRow) {
+          sendJson(response, 400, { ok: false, error: 'Invalid row: key and label must be strings' })
+          return
+        }
+      }
       updateStateFromPayload(parsed)
       broadcast()
       sendJson(response, 200, { ok: true })
