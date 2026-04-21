@@ -177,4 +177,13 @@ const server = http.createServer(async (request, response) => {
   sendJson(response, 404, { ok: false, error: 'Not found' })
 })
 
+server.on('error', (err) => {
+  console.error('[monitor] listen failed:', err.code || err.message)
+  process.exit(1)
+})
+
+server.on('listening', () => {
+  process.stderr.write(`[monitor] listening on ${args.port}\n`)
+})
+
 server.listen(args.port, '127.0.0.1')
