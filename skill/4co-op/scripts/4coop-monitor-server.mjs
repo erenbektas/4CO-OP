@@ -2,14 +2,17 @@ import fs from 'node:fs'
 import path from 'node:path'
 import http from 'node:http'
 import { URL } from 'node:url'
-import { resolveBundledPath } from './4coop-paths.mjs'
+import { resolveBundledPath, RUNTIME_DIRNAME } from './4coop-paths.mjs'
 
 function parseArgs(argv) {
-  const args = { port: 0 }
+  const args = { port: 0, errorDir: null }
   for (let index = 0; index < argv.length; index += 1) {
     const current = argv[index]
     if (current === '--port') {
       args.port = Number(argv[index + 1] ?? 0)
+      index += 1
+    } else if (current === '--error-dir') {
+      args.errorDir = argv[index + 1] ?? null
       index += 1
     }
   }
@@ -179,25 +182,37 @@ const server = http.createServer(async (request, response) => {
 })
 
 // One-shot error handler for listen-time failures only.
-// Removed on successful listen so transient post-listen errors don't crash the server.
+// Removed on successful listen so transient post-listen socket errors
+// (e.g. ECONNRESET) don't kill the running server.
 function handleListenError(err) {
   // Write failure details to a state file so the parent process (which spawns
   // with stdio:'ignore') can surface the real cause instead of a generic
-  // "did not become healthy" timeout. Written to .4co-op/ runtime dir.
+  // "did not become healthy" timeout.
   const failure = {
     code: err.code || 'UNKNOWN',
-    message: err.message,
+    message: err?.message ?? String(err),
     port: args.port,
     timestamp: new Date().toISOString(),
   }
+
+  // Use --error-dir CLI arg if provided; otherwise fall back to cwd + RUNTIME_DIRNAME
+  const errorDir = args.errorDir
+    ?? path.join(process.cwd(), RUNTIME_DIRNAME)
+  const errorLogFile = path.join(errorDir, '.monitor-listen-error.json')
+  const errorTmpFile = errorLogFile + '.tmp'
+
   try {
-    const errorLogFile = path.join(process.cwd(), '.4co-op', '.monitor-listen-error.json')
-    fs.mkdirSync(path.dirname(errorLogFile), { recursive: true })
-    fs.writeFileSync(errorLogFile, JSON.stringify(failure), 'utf8')
+    fs.mkdirSync(errorDir, { recursive: true })
+    // Atomic write: tmp -> rename so reader never sees partial JSON
+    fs.writeFileSync(errorTmpFile, JSON.stringify(failure, null, 2), 'utf8')
+    fs.renameSync(errorTmpFile, errorLogFile)
   } catch { /* best-effort; console.error below is secondary */ }
 
   console.error('[monitor] listen failed on port', args.port, ':', failure.code)
-  process.exitCode = 1
+
+  // Close server to release handles, then exit via setImmediate so stderr drains
+  try { server.close() } catch { /* already closed */ }
+  setImmediate(() => { process.exit(1) })
 }
 
 server.on('error', handleListenError)

@@ -322,6 +322,12 @@ export async function ensureMonitor(paths, config, initialState) {
     return { enabled: false, port: null, reused: false }
   }
 
+  // Clean up stale error file from a previous launch so it can't poison this run
+  const errorFile = path.join(paths.runtimeDir, '.monitor-listen-error.json')
+  if (pathExists(errorFile)) {
+    try { fs.unlinkSync(errorFile) } catch { /* best-effort */ }
+  }
+
   const cachedPort = readPortFile(paths.monitorPortFile)
   if (cachedPort && await isHealthy(cachedPort)) {
     await postMonitorState(cachedPort, initialState)
@@ -331,7 +337,7 @@ export async function ensureMonitor(paths, config, initialState) {
   const desiredPort = config.monitor_window.port || 0
   const port = await findOpenPort(desiredPort)
   const scriptPath = resolveBundledPath('scripts', '4coop-monitor-server.mjs')
-  const child = spawn(process.execPath, [scriptPath, '--port', String(port)], {
+  const child = spawn(process.execPath, [scriptPath, '--port', String(port), '--error-dir', paths.runtimeDir], {
     detached: true,
     stdio: 'ignore'
   })
@@ -339,14 +345,12 @@ export async function ensureMonitor(paths, config, initialState) {
 
   const healthy = await waitForHealth(port)
   if (!healthy) {
-    // Check if the server wrote a listen-error state file before dying
-    const errorFile = path.join(paths.runtimeDir, '.monitor-listen-error.json')
     let cause = `Monitor server did not become healthy on port ${port}`
     if (pathExists(errorFile)) {
       try {
         const detail = JSON.parse(fs.readFileSync(errorFile, 'utf8'))
         cause = `Monitor listen failed on port ${detail.port ?? port}: ${detail.code} (${detail.message})`
-        // Clean up so stale errors don't confuse next launch
+        // Clean up after reading
         fs.unlinkSync(errorFile)
       } catch { /* fall through with generic message */ }
     }
