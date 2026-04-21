@@ -1,6 +1,4 @@
-# CCO-OP Architecture
-
-> Layout note: the canonical 4CO-OP source now lives under `skill/4co-op/`. Per-project runtime state now lives under `.4co-op/`. If a project-local Claude-compatible entry point is installed, it is only a thin shim under `.claude/skills/4co-op/`, not the full source tree. If older examples below mention `.claude/runs/`, `.claude/logs/`, or `.claude/agents/4coop-*`, treat those as historical references; the current layout is described in `docs/install.md`.
+# 4CO-OP Architecture
 
 ## 1. Goal
 
@@ -12,7 +10,7 @@ Automate the coding workflow inside Claude Code. The user types a natural-langua
 User (Claude Desktop ▸ Code tab)
       │
       ▼
- /coop "add dark mode toggle"        ◄── user types this
+ /4co-op "add dark mode toggle"      ◄── user types this
       │
       ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -79,7 +77,7 @@ Per-run file that every stage reads + updates for the active run. Schema:
   },
 
   "worktree": {
-    "path": "../CCO-OP-wt-<slug>",
+    "path": "../<repo-name>-wt-<slug>",
     "branch": "feat/<slug>",
     "base": "main"
   },
@@ -107,11 +105,13 @@ Per-run file that every stage reads + updates for the active run. Schema:
 
   "gatekeeper": { "iteration": 1, "verdict": "APPROVE", "severity": "MINOR", "issues": [] },
 
-  "narrator_log": [
-    { "at": "…", "stage": "builder", "msg": "Builder finished — 7 files changed, tests green." }
-  ]
+  "narrator_log": []
 }
 ```
+
+`<repo-name>` is `path.basename(projectRoot)`; see `buildWorktreeInfo` in `skill/4co-op/scripts/4coop-worktree.mjs`.
+
+`narrator_log` is a per-run array reserved for a future chat-transcript feature — the orchestrator currently initializes it empty and does not append to it. The live event stream (`run_start`, `run_end`, `stage_call`, `window_opened`, `window_closed`, `interruption`, `table_snapshot`, `comment_check_start`, `comment_check_end`) is written to the nightly log file, not to `state.json`; see `docs/privacy.md` and `skill/4co-op/scripts/4coop-logger.mjs`.
 
 Why a file, not in-memory: subagents run in isolated contexts. The file is the contract between them.
 
@@ -129,11 +129,11 @@ Every stage is a subagent file in `.4co-op/install/4co-op/agents/`. Each reads t
 
 ### ② Builder — external, called via `codex exec`
 - **Model:** `gpt-5.3-codex`, sandbox `workspace-write`
-- **Pre-step (orchestrator):** `git worktree add ../CCO-OP-wt-<slug> -b feat/<slug>` then write worktree details into state.
+- **Pre-step (orchestrator):** `git worktree add ../<repo-name>-wt-<slug> -b feat/<slug>` then write worktree details into state.
 - **Invocation:**
   ```
   codex exec \
-    --cd ../CCO-OP-wt-<slug> \
+    --cd ../<repo-name>-wt-<slug> \
     --model gpt-5.3-codex \
     --sandbox workspace-write \
     --output-schema .4co-op/install/4co-op/schemas/builder-result.json \
@@ -229,7 +229,7 @@ The mental model: the tag identifies **whose work the message is about**, not wh
 ### Example chat flow
 
 ```
-user: /coop add dark mode toggle
+user: /4co-op add dark mode toggle
 [🧠 Planner | Opus 4.7 1M]: Plan ready — 6 acceptance criteria, touches 3 files. Approve to proceed?
 user: go
 [🛠️ Builder | 5.3-Codex]: Building on feat/dark-mode. I'll ping when the commit lands.
@@ -246,23 +246,30 @@ All the messages above are created by Haiku (coop-narrator) using the info from 
 ### Rules the orchestrator enforces
 
 1. **No untagged messages.** If the orchestrator ever reaches a point where it'd print raw model output without a tag, it routes through the Narrator first. This is a hard invariant.
-2. **Model in the tag must match the stage's actual model.** If a stage's model is swapped later (e.g., Sonnet → Opus for Spec Checker), the tag table in this doc is the source of truth and `coop-narrator.md`'s prompt is regenerated from it.
+2. **Model in the tag must match the stage's actual model.** If a stage's model is swapped later (e.g., Sonnet → Opus for Spec Checker), the tag table in this doc is the source of truth and `4coop-narrator.md`'s prompt is regenerated from it.
 3. **Tag format is byte-exact.** A downstream UI or log parser can split on `[` and `|` without surprise.
 
 ## 6. File layout
 
+The skill lives in three places: the committed source tree, the per-project runtime
+(and install bundle) under `.4co-op/`, and the thin host shim under `.claude/skills/`.
+See `docs/install.md` and `docs/runtime.md` for the long-form version; this section
+names the paths the rest of the doc references.
+
+### Committed source — `skill/4co-op/`
+
 ```
-.claude/
-├── skills/
-│   └── coop/
-│       ├── SKILL.md                 # /coop entry point + orchestration
-│       └── clean.md                 # /coop clean subcommand (see §11)
+skill/4co-op/
+├── SKILL.md                   # /4co-op entry point + reply routing
+├── clean.md                   # /4co-op clean subcommand (see §11)
+├── config.json                # bundled default config (models, tags, monitor, logging)
+├── config.schema.json
 ├── agents/
-│   ├── coop-planner.md
-│   ├── coop-spec-checker.md
-│   ├── coop-escalation.md
-│   ├── coop-pr-reviewer.md
-│   └── coop-narrator.md
+│   ├── 4coop-planner.md
+│   ├── 4coop-spec-checker.md
+│   ├── 4coop-escalation.md
+│   ├── 4coop-pr-reviewer.md
+│   └── 4coop-narrator.md
 ├── schemas/
 │   ├── planner-result.json
 │   ├── spec-check-result.json
@@ -272,42 +279,99 @@ All the messages above are created by Haiku (coop-narrator) using the info from 
 │   ├── builder-result.json
 │   ├── fixer-result.json
 │   └── gatekeeper-verdict.json
-├── scripts/
-│   ├── coop-workflow.mjs            # high-level start/continue/reject/status flow
-│   ├── claude-stage-runner.mjs      # invokes project Claude agents
-│   ├── coop-workflow-utils.mjs      # render/merge helpers for orchestration
-│   ├── coop-lib.mjs                 # shared state, queue, lock, worktree helpers
-│   ├── pipeline-result-validators.mjs
-│   ├── codex-builder.mjs            # wraps codex exec + state update
-│   ├── codex-fixer.mjs              # wraps codex exec resume
-│   ├── codex-gatekeeper.mjs         # gatekeeper wrapper
-│   ├── codex-builder.sh             # POSIX wrapper
-│   ├── codex-fixer.sh               # POSIX wrapper
-│   └── codex-gatekeeper.sh          # POSIX wrapper
-├── runs/
-│   └── <run_id>/
-│       ├── state.json               # per-run state copy (see §3)
-│       ├── plan.md
-│       ├── builder.ndjson           # raw --json stream
-│       ├── review.md
-│       └── gatekeeper.json
-├── pipeline.lock                    # { run_id, feature, started_at } — presence = run active
-└── pipeline-queue.json              # [{ feature, requested_at }, …]
-
-.4co-op/project.config.json         # project-local {build, test, lint} commands (required)
-
-docs/
-└── architecture.md                  # this file
+└── scripts/
+    ├── 4coop-orchestrator.mjs          # top-level start/continue/reject/check-comment/clean
+    ├── 4coop-stage-claude.mjs          # runs a Claude subagent stage
+    ├── 4coop-stage-codex.mjs           # runs a `codex exec` stage
+    ├── 4coop-state.mjs                 # per-run state load/save helpers
+    ├── 4coop-lock.mjs                  # pipeline.lock + queue helpers
+    ├── 4coop-worktree.mjs              # worktree create/remove (see §3 footnote)
+    ├── 4coop-paths.mjs                 # runtime path resolution
+    ├── 4coop-config.mjs                # config load/merge + defaults
+    ├── 4coop-schemas.mjs               # JSON-schema-backed stage output validation
+    ├── 4coop-scaffolder.mjs            # project-local install bundle writer
+    ├── 4coop-logger.mjs                # nightly event log writer (see docs/privacy.md)
+    ├── 4coop-metrics.mjs               # per-stage token/duration tracking
+    ├── 4coop-relay.mjs                 # stage-to-stage prompt relay builder
+    ├── 4coop-canned.mjs                # hardcoded `[4CO-OP]:` replies
+    ├── 4coop-tag-format.mjs            # stage-tag formatting helpers
+    ├── 4coop-monitor-server.mjs        # local tracker HTTP server
+    ├── 4coop-monitor-spawn.mjs         # browser window spawner
+    ├── 4coop-monitor-client.html       # tracker UI page
+    └── install.mjs                     # global + project install entry (see docs/install.md)
 ```
 
-The runtime supports two install layouts: project-local and global. Runtime state now stays in the active project's `.4co-op/` directory, while the Claude-compatible entry point, when installed, is only a thin shim under `.claude/skills/4co-op/`. Bundled assets are resolved relative to the installed script location.
+### Per-project runtime — `.4co-op/`
+
+```
+.4co-op/
+├── install/4co-op/              # scaffolded copy of skill/4co-op/ (see 4coop-scaffolder.mjs)
+├── config.json                  # project-local model/tag/monitor override
+├── project.config.json          # project-local {build, test, lint} commands (required)
+├── 4coop-active.json            # current awaiting-* session, if any
+├── 4coop-pending-config.json    # transient state during config-confirm
+├── runs/
+│   └── <run_id>/
+│       ├── state.json           # per-run state (see §3)
+│       ├── plan.md
+│       ├── review.md
+│       ├── reviewer-input.md    # `gh pr diff` dump for the reviewer
+│       ├── relay/               # stage-to-stage relay prompts
+│       ├── raw/                 # raw per-stage outputs
+│       ├── <stage>-NN.ndjson          # raw --json stream for each stage call
+│       └── <stage>-NN-last-message.txt
+├── logs/                        # nightly event log (see docs/privacy.md)
+├── worktrees/                   # managed throwaway worktrees
+├── monitor.port                 # port of the running tracker server, if any
+├── pipeline.lock                # { run_id, feature, started_at } — presence = run active
+└── pipeline-queue.json          # [{ feature, requested_at }, …]
+```
+
+### Host shim — `.claude/skills/4co-op/`
+
+```
+.claude/skills/4co-op/
+├── SKILL.md                     # copied from skill/4co-op/SKILL.md
+└── clean.md                     # copied from skill/4co-op/clean.md
+```
+
+Nothing else lives under `.claude/` for a normal project-local install; runs,
+logs, worktrees, and agent files all live under `.4co-op/`.
+
+### Source-repo wrappers — `scripts/`
+
+```
+scripts/
+├── 4coop.mjs                    # thin wrapper: node scripts/4coop.mjs start|clean|check-comment
+└── install-4coop.mjs            # thin wrapper: node scripts/install-4coop.mjs --global|--project
+```
+
+### Docs
+
+```
+docs/
+├── architecture.md              # this file
+├── install.md
+├── commands.md
+├── config.md
+├── runtime.md
+├── troubleshooting.md
+├── privacy.md
+└── examples.md
+```
+
+The runtime supports two install layouts: global (`~/.codex/skills/4co-op/` and
+`~/.claude/skills/4co-op/`) and project-local (`.4co-op/install/4co-op/` plus the
+`.claude/skills/4co-op/` shim). Runtime state always stays under the active project's
+`.4co-op/` directory; bundled assets are resolved relative to the installed script
+location. See `docs/install.md`.
 
 ## 7. Orchestration flow (`SKILL.md` pseudocode)
 
 Every call to `say(...)` emits a tagged line to chat via the Narrator subagent (§5). The orchestrator **never** prints raw model output — it's either a direct-voice stage (Planner, Reviewer, Gatekeeper output whose prompt forces a tag) or it goes through `say(speaker, payload)`.
 
 ```
-on /coop <feature>:
+on /4co-op <feature>:
   # --- queue gate ---
   if lock_held() and lock_is_fresh(max_age=24h):
     append_to_queue({feature, requested_at: now})
@@ -339,11 +403,11 @@ process_feature(feature):
   AskUserQuestion("Approve this plan?")
     → if no: say("coop-meta", {event: "halted", reason: "user_rejected_plan"}); end.
 
-  git worktree add ../CCO-OP-wt-<slug> -b feat/<slug>
+  git worktree add ../<repo-name>-wt-<slug> -b feat/<slug>
   state.worktree = {...}
   say("builder", {phase: "starting", branch: state.worktree.branch})
 
-  builder_result = bash(scripts/codex-builder.sh plan.md state.worktree.path)
+  builder_result = runTrackedStage("builder", plan.md, state.worktree.path)   # 4coop-stage-codex.mjs
   state.builder = builder_result
   say("builder", {phase: "done", commit: builder_result.commit_sha,
                    files: builder_result.files_changed.length,
@@ -373,11 +437,11 @@ process_feature(feature):
 
     if review.issues == []: break
 
-    bash(scripts/codex-fixer.sh state.builder.session_id review.issues)
+    runTrackedStage("fixer", state.builder.codex_session_id, review.issues)   # 4coop-stage-codex.mjs (codex exec resume)
     state.fixer.iterations += 1
     say("fixer", {commits: state.fixer.commits.length})
 
-    verdict = bash(scripts/codex-gatekeeper.sh pr)
+    verdict = runTrackedStage("gatekeeper", pr)                                # 4coop-stage-codex.mjs
     state.gatekeeper = verdict
     say("gatekeeper", {verdict: verdict.verdict, severity: verdict.severity, pr: pr.url})
 
@@ -387,7 +451,7 @@ process_feature(feature):
       break
     if verdict.severity == CRITICAL: continue  # another fix round
 
-# --- lazy worktree sweep (runs at the top of every /coop) ---
+# --- lazy worktree sweep (runs at the top of every /4co-op) ---
 sweep_merged_worktrees():
   for run_dir in glob(".4co-op/runs/*/state.json"):
     s = read_json(run_dir)
@@ -398,7 +462,7 @@ sweep_merged_worktrees():
       bash(f"git worktree remove --force {s.worktree.path}")
       say("coop-meta", {event: "worktree_cleaned", pr: s.pr.number})
 
-# Call sweep_merged_worktrees() once at the top of the queue-gate in /coop, before acquire_lock.
+# Call sweep_merged_worktrees() once at the top of the queue-gate in /4co-op, before acquire_lock.
 
 # say(speaker, payload):
 #   tagged_line = Agent(narrator).run({speaker, payload, state})
@@ -420,16 +484,16 @@ The `assert tagged_line.startswith(tag_for(speaker))` check is the enforcement m
 | Reviewer hits its 10-issue cap | Note in comment: "truncated at 10 — rerun review after fix round" |
 | Gatekeeper ping-pongs on IMPORTANT | Cap at 2 iterations, hand off to user |
 | `codex exec` rate-limited (ChatGPT sign-in) | Surface the error, suggest switching to API key |
-| `/coop` invoked while another is running | Append to `pipeline-queue.json`, emit queued-at-position-N message, exit |
+| `/4co-op` invoked while another is running | Append to `pipeline-queue.json`, emit queued-at-position-N message, exit |
 | Stale `pipeline.lock` (>24h old) | Assume crashed run, clear lock, proceed with current feature |
-| PR merged but worktree still present | Lazy sweep at start of next `/coop` (and inside `/coop clean`) removes it |
+| PR merged but worktree still present | Lazy sweep at start of next `/4co-op` (and inside `/4co-op clean`) removes it |
 | `.4co-op/project.config.json` missing or incomplete | Halt before Builder with `[📣 Coop \| Haiku 4.5]` error; link the exact template to copy |
-| `git worktree remove` fails (e.g., dirty state) | Surface the error; leave worktree for user; `/coop clean --force` overrides |
+| `git worktree remove` fails (e.g., dirty state) | Surface the error; leave worktree for user; `/4co-op clean --force` overrides |
 
 ## 9. Known constraints & open questions
 
 **Constraints**
-- **ChatGPT sign-in rate limits** will bite: GPT-5.4 is 20–100 msgs / 5hr, gpt-5.3-codex is 30–150 / 5hr on Plus. A full `/coop` run uses 3–5 Codex calls (Builder + Fixer×N + Gatekeeper×N). Two or three runs per day is realistic on Plus; dozens is not. Re-evaluate if this bites.
+- **ChatGPT sign-in rate limits** will bite: GPT-5.4 is 20–100 msgs / 5hr, gpt-5.3-codex is 30–150 / 5hr on Plus. A full `/4co-op` run uses 3–5 Codex calls (Builder + Fixer×N + Gatekeeper×N). Two or three runs per day is realistic on Plus; dozens is not. Re-evaluate if this bites.
 - **Worktree path is orchestrator-managed**, not Claude Code's built-in `isolation: worktree` (that one hides the path). We'll `git worktree add` ourselves so Codex and PR tooling can find it.
 - **Strict mode is prompt-enforced**, not a model flag. Output is validated against the schema after the fact; malformed responses halt the pipeline.
 - **Haiku narration ≠ silent**: each narration is a real API call, costs tokens. Cheap but not free.
@@ -437,14 +501,14 @@ The `assert tagged_line.startswith(tag_for(speaker))` check is the enforcement m
 **Resolved decisions**
 - **Plan approval gate:** Always wait for user "go" before Builder starts.
 - **Codex invocation:** `codex exec` with structured output schema for v1. `codex mcp-server` is a later refactor.
-- **Worktree lifecycle:** Fresh throwaway worktree per run. Cleanup is **lazy**: at the start of every new `/coop` (and inside `/coop clean`), the orchestrator scans all previous runs' state files, asks `gh pr view <n> --json state` for each, and runs `git worktree remove` on any whose PR is MERGED or CLOSED. No background polling, no scheduled tasks — merges trigger cleanup on the next invocation.
+- **Worktree lifecycle:** Fresh throwaway worktree per run. Cleanup is **lazy**: at the start of every new `/4co-op` (and inside `/4co-op clean`), the orchestrator scans all previous runs' state files, asks `gh pr view <n> --json state` for each, and runs `git worktree remove` on any whose PR is MERGED or CLOSED. No background polling, no scheduled tasks — merges trigger cleanup on the next invocation.
 - **Project config:** Explicit `.4co-op/project.config.json` with `build`, `test`, `lint` keys. Orchestrator refuses to start Builder if the file is missing or any key is empty — no inference, no guessing.
-- **Concurrent `/coop`:** Queue. A lock file `.4co-op/pipeline.lock` marks the running run; a new `/coop` sees the lock and appends to `.4co-op/pipeline-queue.json` with a "[📣 Coop | Haiku 4.5]: Queued behind <feature> (position N)" reply, then exits. The running pipeline drains the queue at the end of each feature.
-- **Runs history:** Keep forever by default. Deletion is manual via `/coop clean` (see §11).
+- **Concurrent `/4co-op`:** Queue. A lock file `.4co-op/pipeline.lock` marks the running run; a new `/4co-op` sees the lock and appends to `.4co-op/pipeline-queue.json` with a "[📣 Coop | Haiku 4.5]: Queued behind <feature> (position N)" reply, then exits. The running pipeline drains the queue at the end of each feature.
+- **Runs history:** Keep forever by default. Deletion is manual via `/4co-op clean` (see §11).
 
 ## 10. First real run — verification checklist
 
-Before the first `/coop <feature>`:
+Before the first `/4co-op <feature>`:
 - [ ] `codex --version` works (confirmed: 0.121.0)
 - [ ] `codex login` status is healthy
 - [ ] `gh auth status` healthy (confirmed: <github-user>, `repo` scope)
@@ -452,25 +516,25 @@ Before the first `/coop <feature>`:
 - [ ] `.4co-op/install/4co-op/schemas/*.json` present and valid JSON Schema
 - [ ] `.claude/agents/*.md` frontmatter validated (`model`, `permissionMode`, `tools`)
 - [ ] Narrator smoke test: call it with each `speaker` value and confirm the output starts with the exact tag from §5
-- [ ] Dry-run `/coop "rename README.md title"` — smallest change that exercises all 7 stages
-- [ ] Queue test: invoke `/coop A` then `/coop B` before A finishes — confirm B is queued, then auto-starts when A completes
-- [ ] Cleanup test: merge A's PR, run `/coop C` — confirm A's worktree is swept at the top of C
-- [ ] `/coop clean --dry-run` lists what it would delete; `/coop clean --all` does delete
+- [ ] Dry-run `/4co-op "rename README.md title"` — smallest change that exercises all 7 stages
+- [ ] Queue test: invoke `/4co-op A` then `/4co-op B` before A finishes — confirm B is queued, then auto-starts when A completes
+- [ ] Cleanup test: merge A's PR, run `/4co-op C` — confirm A's worktree is swept at the top of C
+- [ ] `/4co-op clean --dry-run` lists what it would delete; `/4co-op clean --all` does delete
 
 First real-feature suggestion: something with a real acceptance checklist but tiny surface area — e.g., "add a `scripts/verify-setup.sh` that checks codex/gh/git presence and exits 0/non-0 accordingly." Forces Builder to write a script + tests + lint, gives Spec Checker real checklist items, produces a small PR for Reviewer/Gatekeeper to exercise end-to-end.
 
-## 11. `/coop clean` command
+## 11. `/4co-op clean` command
 
 Manual cleanup for runs history and orphan worktrees. Packaged as a skill subcommand at `.claude/skills/4co-op/clean.md`.
 
 **Usage:**
 ```
-/coop clean                  # sweeps merged/closed worktrees, leaves run folders alone (safe default)
-/coop clean --older-than 30d # also deletes .4co-op/runs/<id>/ older than 30 days
-/coop clean --keep-last 20   # also keeps only the 20 most recent run folders
-/coop clean --all            # nukes every run folder + every orphan worktree (asks for confirm)
-/coop clean --dry-run        # prints what would be deleted without deleting
-/coop clean --force          # also removes worktrees that fail `git worktree remove` cleanly
+/4co-op clean                  # sweeps merged/closed worktrees, leaves run folders alone (safe default)
+/4co-op clean --older-than 30d # also deletes .4co-op/runs/<id>/ older than 30 days
+/4co-op clean --keep-last 20   # also keeps only the 20 most recent run folders
+/4co-op clean --all            # nukes every run folder + every orphan worktree (asks for confirm)
+/4co-op clean --dry-run        # prints what would be deleted without deleting
+/4co-op clean --force          # also removes worktrees that fail `git worktree remove` cleanly
 ```
 
 **What it does, in order:**
@@ -496,7 +560,7 @@ Every piece of the pipeline maps to a feature that exists today:
 - `permissionMode: plan` for the Planner — enforced
 - `codex exec` with `--cd`, `--model`, `--sandbox`, `--output-schema` — supported
 - `codex exec resume` for Fixer context continuity — supported
-- Skills-based packaging of `/coop` — supported
+- Skills-based packaging of `/4co-op` — supported
 - Narrator pattern via Haiku subagent — idiomatic
 
 The biggest real-world risk is **ChatGPT sign-in rate limits**, not architecture. Everything else is just careful prompt + schema engineering.
