@@ -339,27 +339,42 @@ export async function ensureMonitor(paths, config, initialState) {
   })
 
   await new Promise((resolve, reject) => {
+    let settled = false
+    let timer
+
+    const settle = (fn, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.stderr.off('data', onData)
+      child.off('exit', onExit)
+      fn(value)
+    }
+
     const onData = (chunk) => {
       const text = chunk.toString()
       if (text.includes('[monitor] listening')) {
-        child.stderr.off('data', onData)
-        resolve()
+        settle(resolve, undefined)
       } else if (/EADDRINUSE|EACCES|listen failed/.test(text)) {
-        child.stderr.off('data', onData)
-        reject(new Error(`Monitor failed to start: ${text.trim()}`))
+        settle(reject, new Error(`Monitor failed to start: ${text.trim()}`))
       }
     }
+
+    const onExit = (code) => {
+      settle(reject, new Error(`Monitor exited with code ${code} before listening`))
+    }
+
     child.stderr.on('data', onData)
-    child.once('exit', (code) => {
-      reject(new Error(`Monitor exited with code ${code} before listening`))
-    })
-    const timer = setTimeout(() => {
-      reject(new Error('Monitor startup timeout'))
+    child.once('exit', onExit)
+
+    timer = setTimeout(() => {
+      settle(reject, new Error('Monitor startup timeout'))
     }, 5000)
     timer.unref()
   })
 
   child.unref()
+  child.stderr.destroy()
 
   const healthy = await waitForHealth(port)
   if (!healthy) {

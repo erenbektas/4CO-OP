@@ -2267,7 +2267,7 @@ async function main() {
     }
   }
 
-  printResult(result.status, result.messages.filter(Boolean), result.run_id ? { run_id: result.run_id } : {})
+  printResult(result.status, result.messages.filter(m => m != null), result.run_id ? { run_id: result.run_id } : {})
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {

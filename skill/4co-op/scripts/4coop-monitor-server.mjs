@@ -162,10 +162,13 @@ const server = http.createServer(async (request, response) => {
       const rawRows = parsed.state ? parsed.state.rows : parsed.rows
       if (rawRows !== undefined && Array.isArray(rawRows)) {
         const badRow = rawRows.find(
-          row => typeof row.key !== 'string' || typeof row.label !== 'string'
+          row => typeof row.key !== 'string' || typeof row.label !== 'string' ||
+            (row.tokens !== undefined && typeof row.tokens !== 'number') ||
+            (row.runtime_ms !== undefined && typeof row.runtime_ms !== 'number') ||
+            (row.calls !== undefined && typeof row.calls !== 'number')
         )
         if (badRow) {
-          sendJson(response, 400, { ok: false, error: 'Invalid row: key and label must be strings' })
+          sendJson(response, 400, { ok: false, error: 'Invalid row: key/label must be strings, numeric fields must be numbers' })
           return
         }
       }
@@ -206,8 +209,13 @@ const server = http.createServer(async (request, response) => {
 })
 
 server.on('error', (err) => {
-  console.error('[monitor] listen failed:', err.code || err.message)
-  process.exit(1)
+  if (!server.listening) {
+    process.stderr.write(`[monitor] listen failed: ${err.code || err.message}\n`, () => {
+      process.exit(1)
+    })
+  } else {
+    process.stderr.write(`[monitor] socket error: ${err.code || err.message}\n`)
+  }
 })
 
 server.on('listening', () => {
