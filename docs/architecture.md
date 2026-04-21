@@ -371,6 +371,8 @@ location. See `docs/install.md`.
 
 Every call to `say(...)` emits a tagged line to chat via the Narrator subagent (§5). The orchestrator **never** prints raw model output — it's either a direct-voice stage (Planner, Reviewer, Gatekeeper output whose prompt forces a tag) or it goes through `say(speaker, payload)`.
 
+`runTrackedStage` in the pseudocode below is defined in `skill/4co-op/scripts/4coop-orchestrator.mjs`; it dispatches to `runCodexExec` / `runCodexResume` in `4coop-stage-codex.mjs` for codex stages (builder, fixer, gatekeeper) and to `runClaudeStage` in `4coop-stage-claude.mjs` for claude stages.
+
 ```
 on /4co-op <feature>:
   # --- queue gate ---
@@ -408,7 +410,7 @@ process_feature(feature):
   state.worktree = {...}
   say("builder", {phase: "starting", branch: state.worktree.branch})
 
-  builder_result = runTrackedStage("builder", plan.md, state.worktree.path)   # 4coop-orchestrator.mjs → 4coop-stage-codex.mjs
+  builder_result = runTrackedStage("builder", plan.md, state.worktree.path)
   state.builder = builder_result
   say("builder", {phase: "done", commit: builder_result.commit_sha,
                    files: builder_result.files_changed.length,
@@ -438,11 +440,11 @@ process_feature(feature):
 
     if review.issues == []: break
 
-    runTrackedStage("fixer", state.builder.codex_session_id, review.issues)   # 4coop-orchestrator.mjs → 4coop-stage-codex.mjs (codex exec resume)
+    runTrackedStage("fixer", state.builder.codex_session_id, review.issues)   # codex exec resume
     state.fixer.iterations += 1
     say("fixer", {commits: state.fixer.commits.length})
 
-    verdict = runTrackedStage("gatekeeper", pr)                                # 4coop-orchestrator.mjs → 4coop-stage-codex.mjs
+    verdict = runTrackedStage("gatekeeper", pr)
     state.gatekeeper = verdict
     say("gatekeeper", {verdict: verdict.verdict, severity: verdict.severity, pr: pr.url})
 

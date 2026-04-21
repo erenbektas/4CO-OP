@@ -93,7 +93,7 @@ path used for a given run is stored in `state.worktree.path` inside that run's
 
 Safe to delete:
 
-- yes; `ensureRuntimeDirs` recreates it on the next orchestrator entry point (every run)
+- yes; `ensureRuntimeDirs` recreates it on every orchestrator invocation (handleStart, continue, reject, check-comment, clean)
 
 ### `.4co-op/4coop-active.json`
 
