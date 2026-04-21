@@ -38,14 +38,26 @@ function isLoopbackRequest(request) {
   return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.socket.remoteAddress)
 }
 
-const MAX_CALL_JSON_BYTES = 50000
+const MAX_CALL_STRING_LEN = 20000
+const MAX_CALL_TOTAL_BYTES = 200000
 
 function sanitizeCall(call) {
   if (call == null || typeof call !== 'object') return undefined
   try {
-    const json = JSON.stringify(call)
-    if (json.length > MAX_CALL_JSON_BYTES) return undefined
-    return JSON.parse(json)
+    const truncated = JSON.parse(JSON.stringify(call), (_key, value) => {
+      if (typeof value === 'string' && value.length > MAX_CALL_STRING_LEN) {
+        return `${value.slice(0, MAX_CALL_STRING_LEN)}…[truncated ${value.length - MAX_CALL_STRING_LEN} chars]`
+      }
+      return value
+    })
+    if (JSON.stringify(truncated).length > MAX_CALL_TOTAL_BYTES) {
+      return {
+        _truncated: true,
+        started_at: typeof truncated.started_at === 'string' ? truncated.started_at : undefined,
+        ended_at: typeof truncated.ended_at === 'string' ? truncated.ended_at : undefined
+      }
+    }
+    return truncated
   } catch {
     return undefined
   }

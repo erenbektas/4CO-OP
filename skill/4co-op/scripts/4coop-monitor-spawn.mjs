@@ -345,6 +345,7 @@ export async function ensureMonitor(paths, config, initialState) {
   await new Promise((resolve, reject) => {
     let settled = false
     let timer
+    let buffer = ''
 
     const settle = (fn, value) => {
       if (settled) return
@@ -352,15 +353,20 @@ export async function ensureMonitor(paths, config, initialState) {
       clearTimeout(timer)
       child.stderr.off('data', onData)
       child.off('exit', onExit)
+      if (fn === reject) {
+        try { child.kill() } catch {}
+      }
       fn(value)
     }
 
     const onData = (chunk) => {
-      const text = chunk.toString()
-      if (text.includes('[monitor] listening')) {
+      buffer += chunk.toString()
+      if (buffer.includes('[monitor] listening')) {
         settle(resolve, undefined)
-      } else if (/\[monitor\] listen failed/.test(text)) {
-        settle(reject, new Error(`Monitor failed to start: ${text.trim()}`))
+      } else if (/\[monitor\] listen failed/.test(buffer)) {
+        settle(reject, new Error(`Monitor failed to start: ${buffer.trim()}`))
+      } else if (buffer.length > 10000) {
+        buffer = buffer.slice(-5000)
       }
     }
 
