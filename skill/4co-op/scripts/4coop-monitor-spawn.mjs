@@ -29,6 +29,10 @@ function commandExists(command) {
     return false
   }
 
+  if (!/^[A-Za-z][A-Za-z0-9._-]*$/.test(String(command))) {
+    return false
+  }
+
   if (process.platform === 'win32') {
     const whereProbe = spawnSync('where.exe', [command], { encoding: 'utf8' })
     if (!whereProbe.error && whereProbe.status === 0) {
@@ -355,7 +359,7 @@ export async function ensureMonitor(paths, config, initialState) {
       const text = chunk.toString()
       if (text.includes('[monitor] listening')) {
         settle(resolve, undefined)
-      } else if (/EADDRINUSE|EACCES|listen failed/.test(text)) {
+      } else if (/\[monitor\] listen failed/.test(text)) {
         settle(reject, new Error(`Monitor failed to start: ${text.trim()}`))
       }
     }
@@ -374,6 +378,7 @@ export async function ensureMonitor(paths, config, initialState) {
   })
 
   child.unref()
+  child.stderr.on('data', () => {})
   child.stderr.unref()
 
   const healthy = await waitForHealth(port)

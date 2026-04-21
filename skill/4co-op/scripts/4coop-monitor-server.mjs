@@ -38,19 +38,37 @@ function isLoopbackRequest(request) {
   return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.socket.remoteAddress)
 }
 
+const MAX_CALL_JSON_BYTES = 50000
+
+function sanitizeCall(call) {
+  if (call == null || typeof call !== 'object') return undefined
+  try {
+    const json = JSON.stringify(call)
+    if (json.length > MAX_CALL_JSON_BYTES) return undefined
+    return JSON.parse(json)
+  } catch {
+    return undefined
+  }
+}
+
 function sanitizeRows(rows) {
   if (!Array.isArray(rows)) return []
-  return rows.map(row => ({
-    key: String(row.key ?? ''),
-    label: String(row.label ?? ''),
-    tokens: Number(row.tokens) || 0,
-    exact_tokens: Boolean(row.exact_tokens),
-    runtime_ms: Number(row.runtime_ms) || 0,
-    calls: Number(row.calls) || 0,
-    active: Boolean(row.active),
-    ...(row.last_call !== undefined && { last_call: row.last_call }),
-    ...(row.current_call !== undefined && { current_call: row.current_call })
-  }))
+  return rows.map(row => {
+    const sanitized = {
+      key: String(row.key ?? ''),
+      label: String(row.label ?? ''),
+      tokens: Number(row.tokens) || 0,
+      exact_tokens: Boolean(row.exact_tokens),
+      runtime_ms: Number(row.runtime_ms) || 0,
+      calls: Number(row.calls) || 0,
+      active: Boolean(row.active)
+    }
+    const lastCall = sanitizeCall(row.last_call)
+    if (lastCall !== undefined) sanitized.last_call = lastCall
+    const currentCall = sanitizeCall(row.current_call)
+    if (currentCall !== undefined) sanitized.current_call = currentCall
+    return sanitized
+  })
 }
 
 function updateStateFromPayload(parsed) {
