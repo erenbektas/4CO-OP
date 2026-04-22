@@ -116,13 +116,38 @@ export function extractStructuredPayload(stage, envelope, outputText) {
   throw new Error(`Unable to parse ${stage} output into the expected schema`)
 }
 
+function createLineStream(onLine) {
+  let buffer = ''
+  return {
+    push(chunk) {
+      buffer += chunk.toString()
+      let newlineIndex = buffer.indexOf('\n')
+      while (newlineIndex !== -1) {
+        const line = buffer.slice(0, newlineIndex).replace(/\r$/, '')
+        buffer = buffer.slice(newlineIndex + 1)
+        if (line.trim()) {
+          onLine(line)
+        }
+        newlineIndex = buffer.indexOf('\n')
+      }
+    },
+    flush() {
+      if (buffer.trim()) {
+        onLine(buffer.replace(/\r$/, ''))
+        buffer = ''
+      }
+    }
+  }
+}
+
 export async function runClaudeStage({
   cli = 'claude',
   stage,
   model,
   prompt,
   cwd,
-  timeoutMs = 20 * 60 * 1000
+  timeoutMs = 20 * 60 * 1000,
+  onEvent = null
 }) {
   return await new Promise((resolve, reject) => {
     const args = ['-p', prompt, '--model', model, '--output-format', 'json']
@@ -139,8 +164,22 @@ export async function runClaudeStage({
       child.kill('SIGTERM')
     }, timeoutMs)
 
+    const lineStream = onEvent
+      ? createLineStream(line => {
+          try {
+            const parsed = JSON.parse(line)
+            onEvent(parsed, line)
+          } catch {
+            // Non-JSON lines — ignore
+          }
+        })
+      : null
+
     child.stdout.on('data', chunk => {
       stdout += chunk.toString()
+      if (lineStream) {
+        lineStream.push(chunk)
+      }
     })
     child.stderr.on('data', chunk => {
       stderr += chunk.toString()
@@ -151,6 +190,9 @@ export async function runClaudeStage({
     })
     child.on('close', exitCode => {
       clearTimeout(timeout)
+      if (lineStream) {
+        lineStream.flush()
+      }
       if (timedOut) {
         reject(new Error(`${stage} timed out after ${timeoutMs}ms`))
         return

@@ -11,6 +11,29 @@ const DISPLAY_ORDER = [
   'total'
 ]
 
+const EVENT_TOKEN_CATEGORIES = ['reads', 'edits', 'bash', 'model_turns', 'other']
+
+function emptyEventTokens() {
+  const out = {}
+  for (const key of EVENT_TOKEN_CATEGORIES) {
+    out[key] = 0
+  }
+  return out
+}
+
+function mergeEventTokens(target, source) {
+  if (!source) {
+    return target
+  }
+  for (const key of EVENT_TOKEN_CATEGORIES) {
+    const value = Number(source[key] ?? 0)
+    if (Number.isFinite(value)) {
+      target[key] += value
+    }
+  }
+  return target
+}
+
 function stripReasoningBlocks(text) {
   return String(text ?? '')
     .replace(/```reasoning[\s\S]*?```/gi, '')
@@ -18,33 +41,84 @@ function stripReasoningBlocks(text) {
     .trim()
 }
 
-function createRow(key, label, tag) {
+function createRow(key, label, tag, { cli = null, model = null } = {}) {
   return {
     key,
     label,
     tag,
+    cli,
+    model,
     tokens: 0,
     runtime_ms: 0,
     calls: 0,
     active: false,
     interrupted: false,
     exact_tokens: true,
+    event_tokens: emptyEventTokens(),
     last_call: null,
     current_call: null
   }
 }
 
+function stageModelInfo(config, stage) {
+  const modelConfig = config?.models?.[stage]
+  if (!modelConfig) {
+    return { cli: null, model: null }
+  }
+  return { cli: modelConfig.cli ?? null, model: modelConfig.model ?? null }
+}
+
 export function createMonitorState(config) {
   const rows = {
     idle: createRow('idle', 'Idle', '—'),
-    planner: createRow('planner', 'Planner', config.tags.planner.replace('{tag_display}', config.models.planner.tag_display)),
-    builder: createRow('builder', 'Builder', config.tags.builder.replace('{tag_display}', config.models.builder.tag_display)),
-    spec_checker: createRow('spec_checker', 'Spec Checker', config.tags.spec_checker.replace('{tag_display}', config.models.spec_checker.tag_display)),
-    escalation: createRow('escalation', 'Escalation', config.tags.escalation.replace('{tag_display}', config.models.escalation.tag_display)),
-    reviewer: createRow('reviewer', 'PR Reviewer', config.tags.reviewer.replace('{tag_display}', config.models.reviewer.tag_display)),
-    fixer: createRow('fixer', 'Fixer', config.tags.fixer.replace('{tag_display}', config.models.fixer.tag_display)),
-    gatekeeper: createRow('gatekeeper', 'Gatekeeper', config.tags.gatekeeper.replace('{tag_display}', config.models.gatekeeper.tag_display)),
-    narrator: createRow('narrator', 'Haiku', config.tags.meta),
+    planner: createRow(
+      'planner',
+      'Planner',
+      config.tags.planner.replace('{tag_display}', config.models.planner.tag_display),
+      stageModelInfo(config, 'planner')
+    ),
+    builder: createRow(
+      'builder',
+      'Builder',
+      config.tags.builder.replace('{tag_display}', config.models.builder.tag_display),
+      stageModelInfo(config, 'builder')
+    ),
+    spec_checker: createRow(
+      'spec_checker',
+      'Spec Checker',
+      config.tags.spec_checker.replace('{tag_display}', config.models.spec_checker.tag_display),
+      stageModelInfo(config, 'spec_checker')
+    ),
+    escalation: createRow(
+      'escalation',
+      'Escalation',
+      config.tags.escalation.replace('{tag_display}', config.models.escalation.tag_display),
+      stageModelInfo(config, 'escalation')
+    ),
+    reviewer: createRow(
+      'reviewer',
+      'PR Reviewer',
+      config.tags.reviewer.replace('{tag_display}', config.models.reviewer.tag_display),
+      stageModelInfo(config, 'reviewer')
+    ),
+    fixer: createRow(
+      'fixer',
+      'Fixer',
+      config.tags.fixer.replace('{tag_display}', config.models.fixer.tag_display),
+      stageModelInfo(config, 'fixer')
+    ),
+    gatekeeper: createRow(
+      'gatekeeper',
+      'Gatekeeper',
+      config.tags.gatekeeper.replace('{tag_display}', config.models.gatekeeper.tag_display),
+      stageModelInfo(config, 'gatekeeper')
+    ),
+    narrator: createRow(
+      'narrator',
+      'Haiku',
+      config.tags.meta,
+      stageModelInfo(config, 'narrator')
+    ),
     total: createRow('total', 'Total Token Usage', '—')
   }
 
@@ -66,6 +140,7 @@ function refreshTotals(state) {
   total.active = false
   total.interrupted = false
   total.exact_tokens = true
+  total.event_tokens = emptyEventTokens()
 
   for (const key of Object.keys(state.rows)) {
     if (key === 'idle' || key === 'total') {
@@ -77,6 +152,7 @@ function refreshTotals(state) {
     total.calls += row.calls
     total.exact_tokens = total.exact_tokens && row.exact_tokens
     total.interrupted = total.interrupted || row.interrupted
+    mergeEventTokens(total.event_tokens, row.event_tokens)
   }
 }
 
@@ -107,7 +183,12 @@ function buildDetailPayload(payload = {}) {
     output_preview: outputFull.length > previewLimit ? `${outputFull.slice(0, previewLimit)}…` : outputFull,
     input_truncated: inputFull.length > previewLimit,
     output_truncated: outputFull.length > previewLimit,
-    interrupted: Boolean(payload.interrupted)
+    interrupted: Boolean(payload.interrupted),
+    structured: payload.structured ?? null,
+    model: payload.model ?? null,
+    cli: payload.cli ?? null,
+    event_tokens: payload.event_tokens ? { ...emptyEventTokens(), ...payload.event_tokens } : emptyEventTokens(),
+    schema_failure: payload.schema_failure ?? null
   }
 }
 
@@ -134,13 +215,19 @@ export function finishStageCall(state, stage, payload = {}) {
   row.runtime_ms += Math.max(durationMs, 0)
   row.tokens += inputTokens + outputTokens
   row.exact_tokens = row.exact_tokens && payload.exact_tokens !== false
+  mergeEventTokens(row.event_tokens, payload.event_tokens)
   row.last_call = buildDetailPayload({
     started_at: startedAt,
     ended_at: endedAt,
     input: payload.input ?? row.current_call?.input ?? '',
     output: payload.output ?? '',
     input_tokens: inputTokens,
-    output_tokens: outputTokens
+    output_tokens: outputTokens,
+    structured: payload.structured ?? null,
+    model: payload.model ?? row.model,
+    cli: payload.cli ?? row.cli,
+    event_tokens: payload.event_tokens ?? null,
+    schema_failure: payload.schema_failure ?? null
   })
   row.current_call = null
   return updateActiveStage(state, 'idle')
@@ -156,6 +243,7 @@ export function interruptStageCall(state, stage, payload = {}) {
   row.tokens += inputTokens + outputTokens
   row.interrupted = true
   row.exact_tokens = row.exact_tokens && payload.exact_tokens !== false
+  mergeEventTokens(row.event_tokens, payload.event_tokens)
   row.last_call = buildDetailPayload({
     started_at: startedAt,
     ended_at: endedAt,
@@ -163,7 +251,12 @@ export function interruptStageCall(state, stage, payload = {}) {
     output: payload.output ?? '',
     input_tokens: inputTokens,
     output_tokens: outputTokens,
-    interrupted: true
+    interrupted: true,
+    structured: payload.structured ?? null,
+    model: payload.model ?? row.model,
+    cli: payload.cli ?? row.cli,
+    event_tokens: payload.event_tokens ?? null,
+    schema_failure: payload.schema_failure ?? null
   })
   row.current_call = null
   return updateActiveStage(state, 'idle')
@@ -190,7 +283,8 @@ export function summarizeMonitorForLog(state) {
         runtime_ms: row.runtime_ms,
         calls: row.calls,
         interrupted: row.interrupted,
-        exact_tokens: row.exact_tokens
+        exact_tokens: row.exact_tokens,
+        event_tokens: { ...row.event_tokens }
       }
     })
 }

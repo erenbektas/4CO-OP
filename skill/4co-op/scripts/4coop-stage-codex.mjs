@@ -21,6 +21,30 @@ function parseJsonLines(stdout) {
     .filter(Boolean)
 }
 
+function createLineStream(onLine) {
+  let buffer = ''
+  return {
+    push(chunk) {
+      buffer += chunk.toString()
+      let newlineIndex = buffer.indexOf('\n')
+      while (newlineIndex !== -1) {
+        const line = buffer.slice(0, newlineIndex).replace(/\r$/, '')
+        buffer = buffer.slice(newlineIndex + 1)
+        if (line.trim()) {
+          onLine(line)
+        }
+        newlineIndex = buffer.indexOf('\n')
+      }
+    },
+    flush() {
+      if (buffer.trim()) {
+        onLine(buffer.replace(/\r$/, ''))
+        buffer = ''
+      }
+    }
+  }
+}
+
 function pluckText(value) {
   if (typeof value === 'string') {
     return value
@@ -115,15 +139,21 @@ function extractOutputText(events, outputFile) {
   return text
 }
 
-function extractStructured(stage, outputText) {
+function extractStructured(stage, outputText, stdout, stderr) {
   const parsed = extractJsonObject(outputText)
   if (parsed && validateStageResult(stage, parsed)) {
     return parsed
   }
-  throw new Error(`Unable to parse ${stage} result from Codex output`)
+  const err = new Error(`Unable to parse ${stage} result from Codex output`)
+  err.name = 'StageSchemaError'
+  err.stage = stage
+  err.outputText = outputText
+  err.stdout = stdout
+  err.stderr = stderr
+  throw err
 }
 
-async function runCodex(args, { prompt, cwd, timeoutMs, outputFile, rawOutputPath, stage }) {
+async function runCodex(args, { prompt, cwd, timeoutMs, outputFile, rawOutputPath, stage, onEvent }) {
   return await new Promise((resolve, reject) => {
     const child = spawn('codex', args, {
       cwd,
@@ -138,8 +168,22 @@ async function runCodex(args, { prompt, cwd, timeoutMs, outputFile, rawOutputPat
       child.kill('SIGTERM')
     }, timeoutMs)
 
+    const lineStream = onEvent
+      ? createLineStream(line => {
+          try {
+            const parsed = JSON.parse(line)
+            onEvent(parsed, line)
+          } catch {
+            // Non-JSON lines (startup banners, warnings) — ignore for event stream
+          }
+        })
+      : null
+
     child.stdout.on('data', chunk => {
       stdout += chunk.toString()
+      if (lineStream) {
+        lineStream.push(chunk)
+      }
     })
     child.stderr.on('data', chunk => {
       stderr += chunk.toString()
@@ -150,6 +194,9 @@ async function runCodex(args, { prompt, cwd, timeoutMs, outputFile, rawOutputPat
     })
     child.on('close', exitCode => {
       clearTimeout(timeout)
+      if (lineStream) {
+        lineStream.flush()
+      }
       if (rawOutputPath) {
         fs.writeFileSync(rawOutputPath, stdout, 'utf8')
       }
@@ -165,7 +212,13 @@ async function runCodex(args, { prompt, cwd, timeoutMs, outputFile, rawOutputPat
       const events = parseJsonLines(stdout)
       const outputText = extractOutputText(events, outputFile)
       const usage = extractUsage(events, prompt, outputText)
-      const structured = extractStructured(stage, outputText)
+      let structured
+      try {
+        structured = extractStructured(stage, outputText, stdout, stderr)
+      } catch (error) {
+        reject(error)
+        return
+      }
       resolve({
         exitCode,
         stdout,
@@ -191,7 +244,8 @@ export async function runCodexExec({
   outputFile,
   rawOutputPath = null,
   sandboxMode = 'workspace-write',
-  timeoutMs = 60 * 60 * 1000
+  timeoutMs = 60 * 60 * 1000,
+  onEvent = null
 }) {
   const args = ['exec', '--cd', cwd, '-m', model, '-s', sandboxMode, '--color', 'never', '--json', '-o', outputFile]
   if (schemaPath) {
@@ -205,7 +259,8 @@ export async function runCodexExec({
     timeoutMs,
     outputFile,
     rawOutputPath,
-    stage
+    stage,
+    onEvent
   })
 }
 
@@ -217,7 +272,8 @@ export async function runCodexResume({
   cwd,
   outputFile,
   rawOutputPath = null,
-  timeoutMs = 60 * 60 * 1000
+  timeoutMs = 60 * 60 * 1000,
+  onEvent = null
 }) {
   const args = ['exec', 'resume', sessionId, '-m', model, '--full-auto', '--json', '-o', outputFile, '-']
   return await runCodex(args, {
@@ -226,6 +282,7 @@ export async function runCodexResume({
     timeoutMs,
     outputFile,
     rawOutputPath,
-    stage
+    stage,
+    onEvent
   })
 }

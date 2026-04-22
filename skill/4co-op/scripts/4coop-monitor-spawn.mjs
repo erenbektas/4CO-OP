@@ -9,11 +9,11 @@ import {
 } from './4coop-paths.mjs'
 
 const DEFAULT_WINDOW_SIZE = '760,860'
-const AUTO_BROWSER = 'auto'
+const DEFAULT_BROWSER = 'system'
 
 function normalizeBrowserPreference(browser) {
-  const raw = String(browser ?? AUTO_BROWSER).trim()
-  return raw || AUTO_BROWSER
+  const raw = String(browser ?? DEFAULT_BROWSER).trim()
+  return raw || DEFAULT_BROWSER
 }
 
 function looksLikeExecutablePath(value) {
@@ -124,7 +124,7 @@ function linuxBrowserCandidates(preference) {
 
 export function buildBrowserLaunchPlan({
   platform = process.platform,
-  browser = AUTO_BROWSER,
+  browser = DEFAULT_BROWSER,
   url,
   windowSize = DEFAULT_WINDOW_SIZE,
   availability = {
@@ -317,6 +317,35 @@ export async function postMonitorState(port, state) {
   return true
 }
 
+export async function postStageEvent(port, payload) {
+  if (!port) return false
+  try {
+    await fetchWithTimeout(`http://127.0.0.1:${port}/stage-event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }, 200)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function nudgeCockpit(paths) {
+  const port = paths?.monitorPortFile ? readPortFile(paths.monitorPortFile) : null
+  if (!port) {
+    return false
+  }
+  try {
+    const response = await fetchWithTimeout(`http://127.0.0.1:${port}/cockpit/refresh`, {
+      method: 'POST'
+    }, 300)
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
 export async function ensureMonitor(paths, config, initialState) {
   if (!config.monitor_window.enabled) {
     return { enabled: false, port: null, reused: false }
@@ -324,6 +353,15 @@ export async function ensureMonitor(paths, config, initialState) {
 
   const cachedPort = readPortFile(paths.monitorPortFile)
   if (cachedPort && await isHealthy(cachedPort)) {
+    if (paths?.projectRoot) {
+      try {
+        await fetchWithTimeout(`http://127.0.0.1:${cachedPort}/bind`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ project_root: paths.projectRoot })
+        }, 300)
+      } catch {}
+    }
     await postMonitorState(cachedPort, initialState)
     return { enabled: true, port: cachedPort, reused: true }
   }
@@ -331,7 +369,11 @@ export async function ensureMonitor(paths, config, initialState) {
   const desiredPort = config.monitor_window.port || 0
   const port = await findOpenPort(desiredPort)
   const scriptPath = resolveBundledPath('scripts', '4coop-monitor-server.mjs')
-  const child = spawn(process.execPath, [scriptPath, '--port', String(port)], {
+  const spawnArgs = [scriptPath, '--port', String(port)]
+  if (paths?.projectRoot) {
+    spawnArgs.push('--project-root', paths.projectRoot)
+  }
+  const child = spawn(process.execPath, spawnArgs, {
     detached: true,
     stdio: 'ignore'
   })
@@ -348,7 +390,7 @@ export async function ensureMonitor(paths, config, initialState) {
 
   if (config.monitor_window.auto_launch) {
     try {
-      launchBrowser(config.monitor_window.browser || AUTO_BROWSER, port)
+      launchBrowser(config.monitor_window.browser || DEFAULT_BROWSER, port)
     } catch {
       // The monitor is supplemental. If auto-launch fails, keep the pipeline running.
     }
