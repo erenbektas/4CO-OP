@@ -39,7 +39,7 @@ function isLoopbackRequest(request) {
 }
 
 const MAX_CALL_STRING_LEN = 20000
-const MAX_CALL_TOTAL_BYTES = 200000
+const MAX_CALL_TOTAL_CHARS = 200000
 
 function truncateString(value) {
   if (value.length <= MAX_CALL_STRING_LEN) return value
@@ -57,8 +57,9 @@ function sanitizeCallValue(value, seen) {
     if (Array.isArray(value)) {
       return value.map(item => sanitizeCallValue(item, seen))
     }
-    const output = {}
+    const output = Object.create(null)
     for (const [key, innerValue] of Object.entries(value)) {
+      if (key === '__proto__' || key === 'constructor') continue
       output[key] = sanitizeCallValue(innerValue, seen)
     }
     return output
@@ -72,18 +73,19 @@ function sanitizeCall(call) {
   try {
     const sanitized = sanitizeCallValue(call, new WeakSet())
     const json = JSON.stringify(sanitized)
-    if (!json || json.length > MAX_CALL_TOTAL_BYTES) {
+    if (!json || json.length > MAX_CALL_TOTAL_CHARS) {
       return {
         _truncated: true,
         started_at: typeof call.started_at === 'string' ? call.started_at : undefined,
         ended_at: typeof call.ended_at === 'string' ? call.ended_at : undefined,
         stage: typeof call.stage === 'string' ? truncateString(call.stage) : undefined,
         error_type: typeof call.error_type === 'string' ? truncateString(call.error_type) : undefined,
-        call_id: typeof call.call_id === 'string' || typeof call.call_id === 'number' ? call.call_id : undefined
+        call_id: typeof call.call_id === 'string' ? truncateString(call.call_id) : typeof call.call_id === 'number' ? call.call_id : undefined
       }
     }
     return sanitized
-  } catch {
+  } catch (err) {
+    process.stderr.write(`[monitor] sanitizeCall error: ${err.message}\n`)
     return undefined
   }
 }
