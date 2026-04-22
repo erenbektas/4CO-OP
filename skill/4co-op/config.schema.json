@@ -85,8 +85,8 @@
         "browser": {
           "type": "string",
           "minLength": 1,
-          "default": "auto",
-          "description": "Browser launcher preference. Use 'auto' for cross-platform detection, 'system' to force the default URL opener, or a browser name/path such as edge, chrome, brave, or an executable path."
+          "default": "system",
+          "description": "Browser launcher preference. Defaults to 'system', which opens the tracker in the OS default browser. Use 'auto' to prefer an app-style window via Chrome/Edge/Brave if installed, or pass a browser name/path such as edge, chrome, brave, or an executable path."
         }
       }
     },

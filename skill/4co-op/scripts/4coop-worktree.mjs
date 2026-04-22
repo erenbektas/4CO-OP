@@ -9,7 +9,19 @@ function runGit(projectRoot, args) {
   })
 }
 
-export function detectBaseBranch(projectRoot) {
+export function detectBaseBranch(projectRoot, preferred = null) {
+  if (preferred) {
+    const localOk = runGit(projectRoot, ['rev-parse', '--verify', preferred]).status === 0
+    if (localOk) {
+      return preferred
+    }
+    const remoteOk = runGit(projectRoot, ['rev-parse', '--verify', `origin/${preferred}`]).status === 0
+    if (remoteOk) {
+      return preferred
+    }
+    throw new Error(`Base branch not found locally or on origin: ${preferred}`)
+  }
+
   const symbolic = runGit(projectRoot, ['symbolic-ref', 'refs/remotes/origin/HEAD'])
   if (symbolic.status === 0) {
     const value = symbolic.stdout.trim()
@@ -29,6 +41,43 @@ export function detectBaseBranch(projectRoot) {
   throw new Error('Unable to detect a base branch from origin/HEAD, main, or master')
 }
 
+export function listBaseBranchCandidates(projectRoot) {
+  const result = runGit(projectRoot, [
+    'for-each-ref',
+    '--format=%(refname:short)',
+    'refs/heads',
+    'refs/remotes/origin'
+  ])
+
+  const branches = []
+  if (result.status === 0) {
+    const seen = new Set()
+    for (const raw of result.stdout.split('\n')) {
+      const name = raw.trim()
+      if (!name || name === 'origin') {
+        continue
+      }
+      const short = name.startsWith('origin/') ? name.slice('origin/'.length) : name
+      if (!short || short === 'HEAD') {
+        continue
+      }
+      if (!seen.has(short)) {
+        seen.add(short)
+        branches.push(short)
+      }
+    }
+  }
+
+  let def = ''
+  try {
+    def = detectBaseBranch(projectRoot)
+  } catch {
+    def = ''
+  }
+
+  return { branches, default: def }
+}
+
 export function buildWorktreeInfo(projectRoot, feature) {
   const slug = slugify(feature)
   const repoName = path.basename(projectRoot)
@@ -38,23 +87,26 @@ export function buildWorktreeInfo(projectRoot, feature) {
   }
 }
 
-export function ensureWorktree(projectRoot, feature) {
-  const base = detectBaseBranch(projectRoot)
+export function ensureWorktree(projectRoot, feature, base = null) {
+  const resolvedBase = base ? detectBaseBranch(projectRoot, base) : detectBaseBranch(projectRoot)
   const info = buildWorktreeInfo(projectRoot, feature)
   if (pathExists(info.path)) {
-    return { ...info, base }
+    return { ...info, base: resolvedBase }
   }
 
   const branchExists = runGit(projectRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${info.branch}`]).status === 0
+  const startPoint = runGit(projectRoot, ['rev-parse', '--verify', resolvedBase]).status === 0
+    ? resolvedBase
+    : `origin/${resolvedBase}`
   const args = branchExists
     ? ['worktree', 'add', info.path, info.branch]
-    : ['worktree', 'add', info.path, '-b', info.branch, base]
+    : ['worktree', 'add', info.path, '-b', info.branch, startPoint]
 
   const created = runGit(projectRoot, args)
   if (created.status !== 0) {
     throw new Error(created.stderr.trim() || `Failed to create worktree ${info.path}`)
   }
-  return { ...info, base }
+  return { ...info, base: resolvedBase }
 }
 
 export function removeWorktree(projectRoot, worktreePath, force = false) {

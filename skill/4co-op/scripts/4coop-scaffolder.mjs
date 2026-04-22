@@ -8,7 +8,7 @@ import {
   pathExists,
   readJsonIfExists
 } from './4coop-paths.mjs'
-import { getDefaultConfig, loadConfig } from './4coop-config.mjs'
+import { getDefaultConfig, loadConfig, migrateProjectConfig } from './4coop-config.mjs'
 
 const AGENT_FILES = [
   ['4coop-planner.md', 'planner'],
@@ -220,6 +220,7 @@ export function refreshAgentsFromConfig(projectRoot) {
   if (!isProjectScaffoldComplete(projectRoot)) {
     return false
   }
+  migrateProjectConfig(projectRoot)
   const config = loadConfig(projectRoot)
   syncAgents(projectRoot, config)
   return true

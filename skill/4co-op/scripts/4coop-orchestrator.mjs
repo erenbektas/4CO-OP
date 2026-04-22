@@ -17,8 +17,10 @@ import {
 import {
   approvalPrompt,
   awaitingPrompt,
+  baseBranchInvalid,
+  baseBranchSet,
+  branchList,
   configHelp,
-  configRequirements,
   configProposal,
   halted,
   mergeReadyHint,
@@ -41,6 +43,9 @@ import {
   validateProjectCommands
 } from './4coop-config.mjs'
 import {
+  collectManifestSnippets
+} from './4coop-detect.mjs'
+import {
   acquireLock,
   enqueue,
   lockIsFresh,
@@ -57,7 +62,8 @@ import {
   summarizeMonitorForLog
 } from './4coop-metrics.mjs'
 import { createLogger } from './4coop-logger.mjs'
-import { ensureMonitor, postMonitorState, shutdownMonitor } from './4coop-monitor-spawn.mjs'
+import { ensureMonitor, nudgeCockpit, postMonitorState, postStageEvent, shutdownMonitor } from './4coop-monitor-spawn.mjs'
+import { createLiveEventSink } from './4coop-live-events.mjs'
 import { createPlannerRelayPrompt, createStageRelayPrompt, writeRelayFile } from './4coop-relay.mjs'
 import {
   clearActiveSession,
@@ -66,13 +72,30 @@ import {
   saveActiveSession,
   saveRunState
 } from './4coop-state.mjs'
-import { ensureWorktree, removeWorktree } from './4coop-worktree.mjs'
+import { detectBaseBranch, ensureWorktree, listBaseBranchCandidates, removeWorktree } from './4coop-worktree.mjs'
 import { ensureTagged, stripLeadingTag, withTag } from './4coop-tag-format.mjs'
 import { runClaudeStage } from './4coop-stage-claude.mjs'
 import { runCodexExec, runCodexResume } from './4coop-stage-codex.mjs'
 import { isProjectScaffoldComplete, refreshAgentsFromConfig, scaffoldProject } from './4coop-scaffolder.mjs'
 
 const READ_ONLY_STAGES = new Set(['planner', 'spec_checker', 'escalation', 'reviewer', 'gatekeeper', 'narrator'])
+
+async function saveActiveSessionAndNudge(basePaths, sessionData) {
+  saveActiveSession(basePaths, sessionData)
+  try {
+    await nudgeCockpit(basePaths)
+  } catch {
+    // Monitor may not be running; halt flow should not depend on the UI.
+  }
+}
+
+async function clearActiveSessionAndNudge(pathsLike) {
+  clearActiveSession(pathsLike)
+  try {
+    await nudgeCockpit(pathsLike)
+  } catch {}
+}
+
 const STAGE_SCHEMA_FILES = {
   planner: 'planner-result.json',
   builder: 'builder-result.json',
@@ -83,16 +106,6 @@ const STAGE_SCHEMA_FILES = {
   gatekeeper: 'gatekeeper-verdict.json',
   narrator: 'narrator-result.json'
 }
-const SETUP_MANIFEST_FILES = [
-  'package.json',
-  'pyproject.toml',
-  'go.mod',
-  'Cargo.toml',
-  'Makefile',
-  'Gemfile',
-  'Rakefile',
-  'composer.json'
-]
 
 function parseArgs(argv) {
   const [command = 'start', ...rest] = argv
@@ -100,13 +113,16 @@ function parseArgs(argv) {
     command,
     feature: '',
     answer: '',
+    base: '',
     flags: []
   }
 
   for (let index = 0; index < rest.length; index += 1) {
     const current = rest[index]
-    if (current === '--feature' || current === '--answer') {
-      const target = current === '--feature' ? 'feature' : 'answer'
+    if (current === '--feature' || current === '--answer' || current === '--base') {
+      const target = current === '--feature'
+        ? 'feature'
+        : current === '--answer' ? 'answer' : 'base'
       const values = []
       for (let inner = index + 1; inner < rest.length; inner += 1) {
         if (rest[inner].startsWith('--')) {
@@ -126,6 +142,11 @@ function parseArgs(argv) {
 
   if (!parsed.feature && parsed.command === 'start') {
     parsed.feature = parsed.flags.join(' ').trim()
+    parsed.flags = []
+  }
+
+  if (parsed.command === 'set-base' && !parsed.base) {
+    parsed.base = parsed.flags.join(' ').trim()
     parsed.flags = []
   }
 
@@ -444,20 +465,7 @@ function fetchPullRequestConversation(state, worktreePath) {
   }
 }
 
-function collectSetupManifestEntries(projectRoot) {
-  return SETUP_MANIFEST_FILES
-    .map(fileName => path.join(projectRoot, fileName))
-    .filter(pathExists)
-    .map(filePath => {
-      const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/).slice(0, 100).join('\n')
-      return {
-        relative_path: relativeProjectPath(projectRoot, filePath),
-        snippet: lines
-      }
-    })
-}
-
-function buildSetupAssistantPrompt(config, manifestEntries) {
+function buildSetupAssistantPrompt(config, manifestEntries, fallback) {
   const manifestBlock = manifestEntries.length > 0
     ? manifestEntries.map(entry => {
       return [
@@ -467,23 +475,35 @@ function buildSetupAssistantPrompt(config, manifestEntries) {
         '```'
       ].join('\n')
     }).join('\n\n')
-    : 'No recognized manifest files were provided.'
+    : 'No recognized manifest files were found.'
+
+  const hintBlock = fallback ? [
+    '',
+    'Deterministic detector hint (you may override if the manifests suggest something better):',
+    `  detected_stack = ${fallback.detected_stack}`,
+    `  proposed_build = ${fallback.proposed_build || '(none)'}`,
+    `  proposed_test  = ${fallback.proposed_test || '(none)'}`,
+    `  proposed_lint  = ${fallback.proposed_lint || '(none)'}`,
+    ''
+  ].join('\n') : ''
 
   return [
     'You are the 4CO-OP narrator in setup-assistant mode.',
     `Return only JSON with tagged_message starting exactly with "${config.tags.meta}:".`,
-    'Inspect only the manifest snippets provided below.',
+    'Inspect the manifest and config snippets provided below.',
     'Pick sensible build, test, and lint commands for this project.',
-    'Prefer commands that are explicitly present in the manifests.',
+    'Prefer commands explicitly declared in the manifests (e.g. package.json scripts, Makefile targets, justfile recipes).',
+    'Prefer wrapper scripts when present (./gradlew, ./mvnw).',
+    'Pick the package manager suggested by any lockfile bullets listed below (bun.lockb → bun, pnpm-lock.yaml → pnpm, yarn.lock → yarn, package-lock.json → npm).',
     'If the project does not appear to have tests yet, proposed_test may be an empty string.',
     'Return keys: tagged_message, detected_stack, proposed_build, proposed_test, proposed_lint, confidence, summary.',
-    '',
+    hintBlock,
     manifestBlock
   ].join('\n')
 }
 
 async function runSetupAssistant(projectRoot, config) {
-  const manifestEntries = collectSetupManifestEntries(projectRoot)
+  const manifestEntries = collectManifestSnippets(projectRoot)
   const fallback = proposeProjectCommands(projectRoot)
 
   try {
@@ -491,7 +511,7 @@ async function runSetupAssistant(projectRoot, config) {
       cli: config.models.narrator.cli,
       stage: 'narrator',
       model: config.models.narrator.model,
-      prompt: buildSetupAssistantPrompt(config, manifestEntries),
+      prompt: buildSetupAssistantPrompt(config, manifestEntries, fallback),
       cwd: projectRoot,
       timeoutMs: 5 * 60 * 1000
     })
@@ -531,7 +551,13 @@ function parseConfigAnswer(answer, proposal) {
   if (/^cancel\b/i.test(trimmed)) {
     return { action: 'cancel' }
   }
-  if (/^(ok|yes|use these)\b/i.test(trimmed)) {
+  if (/^(skip|skip all|just start|just run|nothing)\b/i.test(trimmed)) {
+    return {
+      action: 'accept',
+      commands: { build: '', test: '', lint: '' }
+    }
+  }
+  if (/^(ok|okay|yes|use these|use proposed|accept)\b/i.test(trimmed)) {
     return {
       action: 'accept',
       commands: {
@@ -541,13 +567,33 @@ function parseConfigAnswer(answer, proposal) {
       }
     }
   }
-  if (/^(no tests|skip tests)\b/i.test(trimmed)) {
+  if (/^(no tests|skip tests|without tests)\b/i.test(trimmed)) {
     return {
       action: 'accept',
       commands: {
         build: proposal.proposed_build ?? '',
         test: '',
         lint: proposal.proposed_lint ?? ''
+      }
+    }
+  }
+  if (/^(no build|skip build|without build)\b/i.test(trimmed)) {
+    return {
+      action: 'accept',
+      commands: {
+        build: '',
+        test: proposal.proposed_test ?? '',
+        lint: proposal.proposed_lint ?? ''
+      }
+    }
+  }
+  if (/^(no lint|skip lint|without lint)\b/i.test(trimmed)) {
+    return {
+      action: 'accept',
+      commands: {
+        build: proposal.proposed_build ?? '',
+        test: proposal.proposed_test ?? '',
+        lint: ''
       }
     }
   }
@@ -728,6 +774,17 @@ async function runTrackedStage({
   await syncMonitor(paths, state, monitorState, monitorPort)
   snapshot(logger, monitorState)
 
+  const callIndex = (monitorState.rows[stage]?.calls ?? 0) + 1
+  const liveSink = createLiveEventSink({
+    runDir: paths.runDir,
+    stage,
+    callIndex,
+    broadcast: monitorPort
+      ? (eventName, payload) => { postStageEvent(monitorPort, payload).catch(() => {}) }
+      : null
+  })
+  const onEvent = liveSink.onEvent
+
   const started = Date.now()
   try {
     let result
@@ -738,7 +795,8 @@ async function runTrackedStage({
         model: stageConfig.model,
         prompt,
         cwd,
-        timeoutMs
+        timeoutMs,
+        onEvent
       })
     } else if (sessionId) {
       result = await runCodexResume({
@@ -749,7 +807,8 @@ async function runTrackedStage({
         cwd,
         outputFile,
         rawOutputPath,
-        timeoutMs
+        timeoutMs,
+        onEvent
       })
     } else {
       result = await runCodexExec({
@@ -761,7 +820,8 @@ async function runTrackedStage({
         outputFile,
         rawOutputPath,
         sandboxMode: READ_ONLY_STAGES.has(stage) ? 'read-only' : 'workspace-write',
-        timeoutMs
+        timeoutMs,
+        onEvent
       })
     }
 
@@ -774,7 +834,11 @@ async function runTrackedStage({
       input_tokens: result.usage.input_tokens,
       output_tokens: result.usage.output_tokens,
       duration_ms: durationMs,
-      exact_tokens: result.usage.exact
+      exact_tokens: result.usage.exact,
+      structured: result.structured ?? null,
+      model: stageConfig.model,
+      cli: stageConfig.cli,
+      event_tokens: liveSink.tokenAccounting
     })
     logger.write('stage_call', {
       stage,
@@ -783,7 +847,12 @@ async function runTrackedStage({
       input_tokens: result.usage.input_tokens,
       output_tokens: result.usage.output_tokens,
       exit_code: result.exitCode,
-      exact_tokens: result.usage.exact
+      exact_tokens: result.usage.exact,
+      event_tokens: liveSink.tokenAccounting,
+      output_file: outputFile,
+      raw_output_path: rawOutputPath,
+      model: stageConfig.model,
+      cli: stageConfig.cli
     })
     await syncMonitor(paths, state, monitorState, monitorPort)
     snapshot(logger, monitorState)
@@ -792,16 +861,144 @@ async function runTrackedStage({
     interruptStageCall(monitorState, stage, {
       started_at: startedAt,
       ended_at: new Date().toISOString(),
-      input: prompt
+      input: prompt,
+      event_tokens: liveSink.tokenAccounting,
+      model: stageConfig.model,
+      cli: stageConfig.cli,
+      schema_failure: error?.name === 'StageSchemaError' ? {
+        message: error.message,
+        stage: error.stage,
+        output_text_preview: String(error.outputText ?? '').slice(0, 2000),
+        stderr_preview: String(error.stderr ?? '').slice(0, 1000)
+      } : null
     })
     logger.write('interruption', {
       stage,
-      reason_code: 'error'
+      reason_code: error?.name === 'StageSchemaError' ? 'schema_error' : 'error',
+      message: error?.message ?? null,
+      output_file: outputFile,
+      raw_output_path: rawOutputPath
     })
     await syncMonitor(paths, state, monitorState, monitorPort)
     snapshot(logger, monitorState)
     throw error
   }
+}
+
+const STRICT_JSON_PREAMBLE = [
+  'CRITICAL OUTPUT FORMAT REQUIREMENT:',
+  '- Respond with ONLY a single JSON object matching the provided schema.',
+  '- No markdown code fences (no ```json ... ```).',
+  '- No prose before or after the JSON.',
+  '- No commentary, no explanations outside the JSON fields.',
+  '- The response must parse as valid JSON on the first attempt.',
+  ''
+].join('\n')
+
+function writeSchemaFailureArtifact(runDir, stage, attempt, error) {
+  try {
+    const base = `${stage}-failure-attempt-${String(attempt).padStart(2, '0')}`
+    const rawPath = path.join(runDir, `${base}-raw.txt`)
+    fs.writeFileSync(rawPath, String(error?.outputText ?? ''), 'utf8')
+    if (error?.stderr) {
+      const stderrPath = path.join(runDir, `${base}-stderr.txt`)
+      fs.writeFileSync(stderrPath, String(error.stderr), 'utf8')
+    }
+    return rawPath
+  } catch {
+    return null
+  }
+}
+
+async function runSpecCheckerWithRecovery({
+  config,
+  basePrompt,
+  cwd,
+  paths,
+  state,
+  logger,
+  monitorState,
+  monitorPort
+}) {
+  const stage = 'spec_checker'
+  const originalStageConfig = { ...config.models[stage] }
+  const escalationModel = originalStageConfig.escalation_model ?? null
+  const attempts = [
+    { label: 'initial', prompt: basePrompt, overrideModel: null },
+    { label: 'strict_retry', prompt: `${STRICT_JSON_PREAMBLE}${basePrompt}`, overrideModel: null }
+  ]
+  if (escalationModel && escalationModel !== originalStageConfig.model) {
+    attempts.push({
+      label: 'escalation',
+      prompt: `${STRICT_JSON_PREAMBLE}${basePrompt}`,
+      overrideModel: escalationModel
+    })
+  }
+
+  const recoveryTrail = []
+  let lastError = null
+
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attempt = attempts[index]
+    if (attempt.overrideModel) {
+      config.models[stage] = { ...originalStageConfig, model: attempt.overrideModel }
+      logger.write('spec_checker_model_escalation', {
+        attempt: attempt.label,
+        from_model: originalStageConfig.model,
+        to_model: attempt.overrideModel
+      })
+    }
+    try {
+      const result = await runTrackedStage({
+        stage,
+        config,
+        prompt: attempt.prompt,
+        cwd,
+        paths,
+        state,
+        logger,
+        monitorState,
+        monitorPort,
+        timeoutMs: 20 * 60 * 1000
+      })
+      if (recoveryTrail.length > 0) {
+        logger.write('spec_checker_schema_recovered', {
+          attempt: attempt.label,
+          recovered_after: recoveryTrail
+        })
+      }
+      config.models[stage] = originalStageConfig
+      return result
+    } catch (error) {
+      config.models[stage] = originalStageConfig
+      if (!isStageSchemaError(error, stage)) {
+        throw error
+      }
+      lastError = error
+      const rawPath = writeSchemaFailureArtifact(paths.runDir, stage, index + 1, error)
+      recoveryTrail.push({
+        attempt: attempt.label,
+        raw_path: rawPath ? path.basename(rawPath) : null,
+        message: error.message
+      })
+      logger.write('spec_checker_schema_failure', {
+        attempt: attempt.label,
+        model: attempt.overrideModel ?? originalStageConfig.model,
+        raw_path: rawPath ? path.basename(rawPath) : null,
+        message: error.message
+      })
+    }
+  }
+
+  const failure = new Error(
+    `spec checker schema parse failed after ${recoveryTrail.length} attempts — see ${recoveryTrail.map(entry => entry.raw_path).filter(Boolean).join(', ')}`
+  )
+  failure.name = 'StageSchemaError'
+  failure.stage = stage
+  failure.recoveryTrail = recoveryTrail
+  failure.outputText = lastError?.outputText ?? ''
+  failure.stderr = lastError?.stderr ?? ''
+  throw failure
 }
 
 async function runNarrator({
@@ -1061,9 +1258,10 @@ async function handleStart(projectRoot, feature, options = {}) {
   }
 
   if (!isProjectScaffoldComplete(projectRoot)) {
-    saveActiveSession(basePaths, {
+    await saveActiveSessionAndNudge(basePaths, {
       status: 'awaiting_scaffold',
       feature,
+      base: options.base ?? '',
       created_at: new Date().toISOString()
     })
     return {
@@ -1076,9 +1274,10 @@ async function handleStart(projectRoot, feature, options = {}) {
   const projectCommands = loadProjectCommands(basePaths.projectConfigPath)
   if (!projectCommandsReady(projectCommands)) {
     const proposal = await runSetupAssistant(projectRoot, config)
-    saveActiveSession(basePaths, {
+    await saveActiveSessionAndNudge(basePaths, {
       status: 'awaiting_config_confirm',
       feature,
+      base: options.base ?? '',
       proposal,
       created_at: new Date().toISOString()
     })
@@ -1089,7 +1288,7 @@ async function handleStart(projectRoot, feature, options = {}) {
   }
 
   if (!feature) {
-    saveActiveSession(basePaths, {
+    await saveActiveSessionAndNudge(basePaths, {
       status: 'awaiting_prompt',
       created_at: new Date().toISOString()
     })
@@ -1138,13 +1337,15 @@ async function handleStart(projectRoot, feature, options = {}) {
     logFile: logger.filePath
   })
   state.github = githubContext
+  const resolvedBasePreference = (options.base || config.workflow?.default_base_branch || '').trim()
+  state.base_branch_preference = resolvedBasePreference || null
   saveRunState(paths, state)
   acquireLock(basePaths, {
     run_id: runId,
     feature,
     started_at: new Date().toISOString()
   })
-  saveActiveSession(basePaths, {
+  await saveActiveSessionAndNudge(basePaths, {
     status: 'planning',
     run_id: runId,
     feature,
@@ -1216,7 +1417,7 @@ async function handleStart(projectRoot, feature, options = {}) {
     messages.push(plannerMessage)
     messages.push(approvalPrompt(config))
 
-    saveActiveSession(basePaths, {
+    await saveActiveSessionAndNudge(basePaths, {
       status: 'awaiting_approval',
       run_id: runId,
       feature,
@@ -1232,7 +1433,7 @@ async function handleStart(projectRoot, feature, options = {}) {
     }
   } catch (error) {
     finalizeRun(paths, state, logger, 'halted')
-    clearActiveSession(basePaths)
+    await clearActiveSessionAndNudge(basePaths)
     return {
       status: 'halted',
       messages: [
@@ -1250,7 +1451,7 @@ async function continueApprovedRun(projectRoot, activeSession) {
   ensureRuntimeDirs(paths)
   const state = readJsonIfExists(paths.stateFile)
   if (!state) {
-    clearActiveSession(basePaths)
+    await clearActiveSessionAndNudge(basePaths)
     return {
       status: 'halted',
       messages: [halted(config, 'run state not found')]
@@ -1265,8 +1466,33 @@ async function continueApprovedRun(projectRoot, activeSession) {
   const monitorState = state.metrics ?? createMonitorState(config)
   const monitor = await ensureMonitor(paths, config, serializeMonitorState(monitorState))
 
+  await saveActiveSessionAndNudge(basePaths, {
+    status: 'running',
+    run_id: activeSession.run_id,
+    feature: activeSession.feature ?? state.feature_request ?? '',
+    log_file: logger.filePath,
+    monitor_port: monitor.port,
+    created_at: activeSession.created_at ?? new Date().toISOString()
+  })
+
   try {
-    state.worktree = ensureWorktree(projectRoot, state.feature_request)
+    try {
+      state.worktree = ensureWorktree(projectRoot, state.feature_request, state.base_branch_preference ?? null)
+    } catch (worktreeError) {
+      if (state.base_branch_preference) {
+        const { branches } = listBaseBranchCandidates(projectRoot)
+        await clearActiveSessionAndNudge(basePaths)
+        finalizeRun(paths, state, logger, 'halted')
+        return {
+          status: 'halted',
+          messages: [
+            baseBranchInvalid(config, state.base_branch_preference, branches),
+            halted(config, worktreeError.message)
+          ]
+        }
+      }
+      throw worktreeError
+    }
     ensureGitHubContextForState(projectRoot, state)
     saveRunState(paths, state)
 
@@ -1353,17 +1579,15 @@ async function continueApprovedRun(projectRoot, activeSession) {
       planFile: paths.planFile,
       projectRoot
     })}\n\n${buildSpecPrompt(config, state.plan.path)}`
-    const specResult = await runTrackedStage({
-      stage: 'spec_checker',
+    const specResult = await runSpecCheckerWithRecovery({
       config,
-      prompt: specPrompt,
+      basePrompt: specPrompt,
       cwd: state.worktree.path,
       paths,
       state,
       logger,
       monitorState,
-      monitorPort: monitor.port,
-      timeoutMs: 20 * 60 * 1000
+      monitorPort: monitor.port
     })
     state.spec_check = {
       results: specResult.structured.results,
@@ -1428,7 +1652,7 @@ async function continueApprovedRun(projectRoot, activeSession) {
 
     if (state.spec_check.results.some(item => item.status === 'FAIL')) {
       finalizeRun(paths, state, logger, 'halted')
-      clearActiveSession(basePaths)
+      await clearActiveSessionAndNudge(basePaths)
       return {
         status: 'halted',
         messages: [
@@ -1649,7 +1873,7 @@ async function continueApprovedRun(projectRoot, activeSession) {
     }
 
     finalizeRun(paths, state, logger, verdict?.verdict === 'APPROVE' ? 'approved' : 'handed_off')
-    clearActiveSession(basePaths)
+    await clearActiveSessionAndNudge(basePaths)
     logger.write('window_closed', {
       port: monitor.port
     })
@@ -1673,7 +1897,7 @@ async function continueApprovedRun(projectRoot, activeSession) {
     }
   } catch (error) {
     finalizeRun(paths, state, logger, 'halted')
-    clearActiveSession(basePaths)
+    await clearActiveSessionAndNudge(basePaths)
     logger.write('window_closed', {
       port: monitor.port
     })
@@ -1696,7 +1920,7 @@ async function handleReject(projectRoot, activeSession) {
   }
 
   if (activeSession.status === 'awaiting_scaffold' || activeSession.status === 'awaiting_config_confirm') {
-    clearActiveSession(basePaths)
+    await clearActiveSessionAndNudge(basePaths)
     return {
       status: 'rejected',
       messages: [nothingChanged(config)]
@@ -1716,14 +1940,14 @@ async function handleReject(projectRoot, activeSession) {
     } else {
       releaseLock(basePaths)
     }
-    clearActiveSession(basePaths)
+    await clearActiveSessionAndNudge(basePaths)
     return {
       status: 'rejected',
       messages: [halted(config, 'plan rejected by user')]
     }
   }
 
-  clearActiveSession(basePaths)
+  await clearActiveSessionAndNudge(basePaths)
   return {
     status: 'rejected',
     messages: [nothingChanged(config)]
@@ -1733,7 +1957,7 @@ async function handleReject(projectRoot, activeSession) {
 async function handleProvideFeature(projectRoot, feature) {
   const activeSession = loadActiveSession(getRuntimePaths(projectRoot))
   const nextFeature = feature || activeSession?.feature || ''
-  return await handleStart(projectRoot, nextFeature)
+  return await handleStart(projectRoot, nextFeature, { base: activeSession?.base ?? '' })
 }
 
 async function handleConfigConfirm(projectRoot, answer) {
@@ -1749,7 +1973,7 @@ async function handleConfigConfirm(projectRoot, answer) {
 
   const parsed = parseConfigAnswer(answer, active.proposal)
   if (parsed.action === 'cancel') {
-    clearActiveSession(paths)
+    await clearActiveSessionAndNudge(paths)
     return {
       status: 'rejected',
       messages: [nothingChanged(config)]
@@ -1764,21 +1988,15 @@ async function handleConfigConfirm(projectRoot, answer) {
 
   const commandErrors = validateProjectCommands(parsed.commands)
   if (commandErrors.length > 0) {
-    const missingKeys = commandErrors
-      .filter(item => item.endsWith('cannot be empty'))
-      .map(item => item.split(' ')[0])
     return {
       status: 'awaiting_config_confirm',
-      messages: [
-        configRequirements(config, missingKeys.length > 0 ? missingKeys : ['build', 'lint']),
-        configHelp(config)
-      ]
+      messages: [configHelp(config)]
     }
   }
 
   writeProjectCommands(paths, parsed.commands)
-  clearActiveSession(paths)
-  return await handleStart(projectRoot, active.feature ?? '')
+  await clearActiveSessionAndNudge(paths)
+  return await handleStart(projectRoot, active.feature ?? '', { base: active.base ?? '' })
 }
 
 async function handleCheckComment(projectRoot) {
@@ -2221,6 +2439,50 @@ function cleanRuns(projectRoot, flags) {
   }
 }
 
+function handleListBranches(projectRoot) {
+  const config = loadConfig(projectRoot)
+  const { branches, default: def } = listBaseBranchCandidates(projectRoot)
+  const configuredDefault = config.workflow?.default_base_branch?.trim() || def
+  return {
+    status: 'ok',
+    messages: [branchList(config, branches, configuredDefault)]
+  }
+}
+
+function handleSetBase(projectRoot, branch) {
+  const config = loadConfig(projectRoot)
+  const trimmed = (branch || '').trim()
+  if (!trimmed) {
+    return {
+      status: 'halted',
+      messages: [halted(config, 'set-base requires a branch name, e.g. /4co-op set-base develop')]
+    }
+  }
+  try {
+    detectBaseBranch(projectRoot, trimmed)
+  } catch (error) {
+    const { branches } = listBaseBranchCandidates(projectRoot)
+    return {
+      status: 'halted',
+      messages: [
+        baseBranchInvalid(config, trimmed, branches),
+        halted(config, error.message)
+      ]
+    }
+  }
+
+  const paths = getRuntimePaths(projectRoot)
+  ensureRuntimeDirs(paths)
+  const existing = readJsonIfExists(paths.projectConfigOverridePath) ?? {}
+  existing.workflow = { ...(existing.workflow ?? {}), default_base_branch: trimmed }
+  writeJson(paths.projectConfigOverridePath, existing)
+
+  return {
+    status: 'ok',
+    messages: [baseBranchSet(config, trimmed)]
+  }
+}
+
 async function main() {
   const projectRoot = findProjectRoot(process.cwd())
   const args = parseArgs(process.argv.slice(2))
@@ -2229,9 +2491,13 @@ async function main() {
 
   let result
   if (args.command === 'start') {
-    result = await handleStart(projectRoot, args.feature)
+    result = await handleStart(projectRoot, args.feature, { base: args.base })
   } else if (args.command === 'check-comment') {
     result = await handleCheckComment(projectRoot)
+  } else if (args.command === 'list-branches') {
+    result = handleListBranches(projectRoot)
+  } else if (args.command === 'set-base') {
+    result = handleSetBase(projectRoot, args.base)
   } else if (args.command === 'continue-active') {
     const activeSession = loadActiveSession(basePaths)
     if (!activeSession) {
@@ -2241,8 +2507,8 @@ async function main() {
       }
     } else if (activeSession.status === 'awaiting_scaffold') {
       scaffoldProject(projectRoot)
-      clearActiveSession(basePaths)
-      result = await handleStart(projectRoot, activeSession.feature ?? '')
+      await clearActiveSessionAndNudge(basePaths)
+      result = await handleStart(projectRoot, activeSession.feature ?? '', { base: activeSession.base ?? '' })
       result.messages = [scaffolded(loadConfig(projectRoot)), ...result.messages]
     } else if (activeSession.status === 'awaiting_approval') {
       result = await continueApprovedRun(projectRoot, activeSession)
@@ -2270,7 +2536,7 @@ async function main() {
   printResult(result.status, result.messages, result.run_id ? { run_id: result.run_id } : {})
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(error => {
     const projectRoot = findProjectRoot(process.cwd())
     const config = loadConfig(projectRoot)

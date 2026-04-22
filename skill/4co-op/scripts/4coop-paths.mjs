@@ -196,9 +196,11 @@ export function ensureRuntimeDirs(paths) {
 
 export function resolveConfigLookup(projectRoot) {
   const projectPaths = getRuntimePaths(projectRoot)
+  // Bundled first (fallback for missing keys), project override last so user
+  // edits in .4co-op/config.json win over the shipped defaults.
   return [
-    projectPaths.projectConfigOverridePath,
-    resolveBundledPath('config.json')
+    resolveBundledPath('config.json'),
+    projectPaths.projectConfigOverridePath
   ]
 }
 

@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "models": {
     "planner": {
       "cli": "claude",
@@ -9,8 +9,8 @@
     },
     "builder": {
       "cli": "codex",
-      "model": "gpt-5.3-codex",
-      "tag_display": "5.3-Codex"
+      "model": "gpt-5.4",
+      "tag_display": "5.4"
     },
     "spec_checker": {
       "cli": "claude",
@@ -29,8 +29,8 @@
     },
     "fixer": {
       "cli": "codex",
-      "model": "gpt-5.3-codex",
-      "tag_display": "5.3-Codex"
+      "model": "gpt-5.4",
+      "tag_display": "5.4"
     },
     "gatekeeper": {
       "cli": "codex",
@@ -58,7 +58,7 @@
     "enabled": true,
     "port": 0,
     "auto_launch": true,
-    "browser": "auto"
+    "browser": "system"
   },
   "logging": {
     "enabled": true,
