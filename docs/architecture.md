@@ -298,7 +298,7 @@ skill/4co-op/
     ├── 4coop-monitor-server.mjs        # local tracker HTTP server
     ├── 4coop-monitor-spawn.mjs         # browser window spawner
     ├── 4coop-monitor-client.html       # tracker UI page
-    └── install.mjs                     # global + project install entry (skill/4co-op/scripts/install.mjs; see docs/install.md)
+    └── install.mjs                     # global + project install entry (see docs/install.md)
 ```
 
 ### Per-project runtime — `.4co-op/`
