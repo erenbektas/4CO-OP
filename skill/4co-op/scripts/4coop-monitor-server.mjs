@@ -76,8 +76,8 @@ function sanitizeCall(call) {
     if (!json || json.length > MAX_CALL_TOTAL_CHARS) {
       return {
         _truncated: true,
-        started_at: typeof call.started_at === 'string' ? call.started_at : undefined,
-        ended_at: typeof call.ended_at === 'string' ? call.ended_at : undefined,
+        started_at: typeof call.started_at === 'string' ? truncateString(call.started_at) : undefined,
+        ended_at: typeof call.ended_at === 'string' ? truncateString(call.ended_at) : undefined,
         stage: typeof call.stage === 'string' ? truncateString(call.stage) : undefined,
         error_type: typeof call.error_type === 'string' ? truncateString(call.error_type) : undefined,
         call_id: typeof call.call_id === 'string' ? truncateString(call.call_id) : typeof call.call_id === 'number' ? call.call_id : undefined
