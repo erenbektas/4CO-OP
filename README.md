@@ -52,7 +52,7 @@ For details, please check: [Architecture](./docs/architecture.md)
 User (Claude Code (by default))
       │
       ▼
- /coop "add dark mode toggle"        ◄── user types this
+ /4co-op "add dark mode toggle"      ◄── user types this
       │
       ▼
 ┌─────────────────────────────────────────────────────────────┐

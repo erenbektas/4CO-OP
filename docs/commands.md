@@ -121,7 +121,7 @@ The installed skill handles these interaction patterns:
 
 ## Internal Continuation Commands
 
-These are real orchestrator commands, but they are mostly for the installed skill flow, not for normal manual use.
+> These commands are invoked by `SKILL.md` during slash-command handling. You should not type them manually. They are documented here only so `SKILL.md` authors and contributors can read the contract between the skill and the orchestrator.
 
 ### `continue-active`
 
