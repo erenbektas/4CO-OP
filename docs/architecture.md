@@ -25,7 +25,7 @@ User (Claude Desktop ▸ Code tab)
         └── writes plan.md + acceptance_checklist[]
       │
       ▼
-  ② Builder         codex exec -m gpt-5.3-codex   ◄── external CLI
+  ② Builder         codex exec -m gpt-5.4   ◄── external CLI
         │           sandbox workspace-write, --cd <worktree>
         │           stdin: plan.md
         └── commits to feat/<slug> branch in git worktree
@@ -44,7 +44,7 @@ User (Claude Desktop ▸ Code tab)
       │
       ▼   issues found?
   ⑥ Fixer           codex exec resume <builder_session_id>
-        │           -m gpt-5.3-codex
+        │           -m gpt-5.4
         └── commits per-issue fixes to the same branch
       │
       ▼
@@ -128,13 +128,13 @@ Every stage is a subagent file in `.4co-op/install/4co-op/agents/`. Each reads t
 - **Handoff to user:** orchestrator shows the plan; user confirms "go" before stage ②.
 
 ### ② Builder — external, called via `codex exec`
-- **Model:** `gpt-5.3-codex`, sandbox `workspace-write`
+- **Model:** `gpt-5.4`, sandbox `workspace-write`
 - **Pre-step (orchestrator):** `git worktree add ../CCO-OP-wt-<slug> -b feat/<slug>` then write worktree details into state.
 - **Invocation:**
   ```
   codex exec \
     --cd ../CCO-OP-wt-<slug> \
-    --model gpt-5.3-codex \
+    --model gpt-5.4 \
     --sandbox workspace-write \
     --output-schema .4co-op/install/4co-op/schemas/builder-result.json \
     --color never \
@@ -165,13 +165,13 @@ Every stage is a subagent file in `.4co-op/install/4co-op/agents/`. Each reads t
 - **Does NOT fix anything.**
 
 ### ⑥ Fixer — external, `codex exec resume`
-- **Model:** `gpt-5.3-codex`
-- **Key trick:** resume the Builder's session so Codex has full context: `codex exec resume <builder_session_id> --model gpt-5.3-codex -s workspace-write --output-schema .4co-op/install/4co-op/schemas/fixer-result.json -`.
+- **Model:** `gpt-5.4`
+- **Key trick:** resume the Builder's session so Codex has full context: `codex exec resume <builder_session_id> --model gpt-5.4 -s workspace-write --output-schema .4co-op/install/4co-op/schemas/fixer-result.json -`.
 - Scope-locked: prompt restricts edits to files referenced by the reviewer. Anything unrelated is logged to an "Observed (Out of Scope)" section, not fixed.
 - Runs build/test/lint, commits per-issue when practical.
 
 ### ⑦ Gatekeeper — external, `codex exec`
-- **Model:** `gpt-5.4` (different family — bias mitigation)
+- **Model:** `gpt-5.4`
 - Inputs: PR diff + reviewer comments + plan.
 - Output schema (enforced):
   ```jsonc
@@ -200,11 +200,11 @@ Seven actors share one chat thread. The user has to know who's talking, at a gla
 | Stage | Tag |
 |---|---|
 | Planner | `[🧠 Planner \| Opus 4.7 1M]` |
-| Builder | `[🛠️ Builder \| 5.3-Codex]` |
+| Builder | `[🛠️ Builder \| 5.4]` |
 | Spec Checker | `[✅ Spec Checker \| Sonnet 4.6]` |
 | Escalation | `[🔎 Escalation \| Opus 4.7]` |
 | PR Reviewer | `[👓 Reviewer \| Opus 4.7]` |
-| Fixer | `[🔧 Fixer \| 5.3-Codex]` |
+| Fixer | `[🔧 Fixer \| 5.4]` |
 | Gatekeeper | `[⚖️ Gatekeeper \| 5.4]` |
 
 ### Who produces each message
@@ -232,12 +232,12 @@ The mental model: the tag identifies **whose work the message is about**, not wh
 user: /coop add dark mode toggle
 [🧠 Planner | Opus 4.7 1M]: Plan ready — 6 acceptance criteria, touches 3 files. Approve to proceed?
 user: go
-[🛠️ Builder | 5.3-Codex]: Building on feat/dark-mode. I'll ping when the commit lands.
-[🛠️ Builder | 5.3-Codex]: Commit 3a1f9c — 4 files changed, tests + lint green.
+[🛠️ Builder | 5.4]: Building on feat/dark-mode. I'll ping when the commit lands.
+[🛠️ Builder | 5.4]: Commit 3a1f9c — 4 files changed, tests + lint green.
 [✅ Spec Checker | Sonnet 4.6]: 5 of 6 criteria PASS, 1 UNCLEAR (AC-004) — escalating.
 [🔎 Escalation | Opus 4.7]: AC-004 resolved to PASS.
 [👓 Reviewer | Opus 4.7]: 2 issues on PR #14 (1 🟡, 1 🔵). https://github.com/username/repo/pull/14
-[🔧 Fixer | 5.3-Codex]: Fixes applied in 2 commits — rerunning the gate.
+[🔧 Fixer | 5.4]: Fixes applied in 2 commits — rerunning the gate.
 [⚖️ Gatekeeper | 5.4]: APPROVE — severity MINOR. Ready to merge: https://github.com/username/repo/pull/14
 ```
 
@@ -429,7 +429,7 @@ The `assert tagged_line.startswith(tag_for(speaker))` check is the enforcement m
 ## 9. Known constraints & open questions
 
 **Constraints**
-- **ChatGPT sign-in rate limits** will bite: GPT-5.4 is 20–100 msgs / 5hr, gpt-5.3-codex is 30–150 / 5hr on Plus. A full `/coop` run uses 3–5 Codex calls (Builder + Fixer×N + Gatekeeper×N). Two or three runs per day is realistic on Plus; dozens is not. Re-evaluate if this bites.
+- **ChatGPT sign-in rate limits** will bite: GPT-5.4 is 20–100 msgs / 5hr on Plus. A full `/coop` run uses 3–5 Codex calls (Builder + Fixer×N + Gatekeeper×N). Two or three runs per day is realistic on Plus; dozens is not. Re-evaluate if this bites.
 - **Worktree path is orchestrator-managed**, not Claude Code's built-in `isolation: worktree` (that one hides the path). We'll `git worktree add` ourselves so Codex and PR tooling can find it.
 - **Strict mode is prompt-enforced**, not a model flag. Output is validated against the schema after the fact; malformed responses halt the pipeline.
 - **Haiku narration ≠ silent**: each narration is a real API call, costs tokens. Cheap but not free.
