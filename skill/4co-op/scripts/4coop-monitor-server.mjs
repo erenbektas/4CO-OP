@@ -38,12 +38,87 @@ function isLoopbackRequest(request) {
   return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.socket.remoteAddress)
 }
 
+const MAX_CALL_STRING_LEN = 20000
+const MAX_CALL_TOTAL_CHARS = 200000
+
+function truncateString(value) {
+  if (value.length <= MAX_CALL_STRING_LEN) return value
+  return `${value.slice(0, MAX_CALL_STRING_LEN)}…[truncated ${value.length - MAX_CALL_STRING_LEN} chars]`
+}
+
+function sanitizeCallValue(value, seen) {
+  if (typeof value === 'string') return truncateString(value)
+  if (value == null || typeof value !== 'object') return value
+  if (seen.has(value)) {
+    throw new TypeError('Circular structure in call payload')
+  }
+  seen.add(value)
+  try {
+    if (Array.isArray(value)) {
+      return value.map(item => sanitizeCallValue(item, seen))
+    }
+    const output = Object.create(null)
+    for (const [key, innerValue] of Object.entries(value)) {
+      if (key === '__proto__' || key === 'constructor') continue
+      output[key] = sanitizeCallValue(innerValue, seen)
+    }
+    return output
+  } finally {
+    seen.delete(value)
+  }
+}
+
+function sanitizeCall(call) {
+  if (call == null || typeof call !== 'object') return undefined
+  try {
+    const sanitized = sanitizeCallValue(call, new WeakSet())
+    const json = JSON.stringify(sanitized)
+    if (!json || json.length > MAX_CALL_TOTAL_CHARS) {
+      return {
+        _truncated: true,
+        started_at: typeof call.started_at === 'string' ? truncateString(call.started_at) : undefined,
+        ended_at: typeof call.ended_at === 'string' ? truncateString(call.ended_at) : undefined,
+        stage: typeof call.stage === 'string' ? truncateString(call.stage) : undefined,
+        error_type: typeof call.error_type === 'string' ? truncateString(call.error_type) : undefined,
+        call_id: typeof call.call_id === 'string' ? truncateString(call.call_id) : typeof call.call_id === 'number' ? call.call_id : undefined
+      }
+    }
+    return sanitized
+  } catch (err) {
+    process.stderr.write(`[monitor] sanitizeCall error: ${err.message}\n`)
+    return undefined
+  }
+}
+
+function sanitizeRows(rows) {
+  if (!Array.isArray(rows)) return []
+  return rows.map(row => {
+    const sanitized = {
+      key: String(row.key ?? ''),
+      label: String(row.label ?? ''),
+      tokens: Number(row.tokens) || 0,
+      exact_tokens: Boolean(row.exact_tokens),
+      runtime_ms: Number(row.runtime_ms) || 0,
+      calls: Number(row.calls) || 0,
+      active: Boolean(row.active)
+    }
+    const lastCall = sanitizeCall(row.last_call)
+    if (lastCall !== undefined) sanitized.last_call = lastCall
+    const currentCall = sanitizeCall(row.current_call)
+    if (currentCall !== undefined) sanitized.current_call = currentCall
+    return sanitized
+  })
+}
+
 function updateStateFromPayload(parsed) {
   const previousStartedAt = state.started_at ?? new Date().toISOString()
   if (parsed.state) {
     state = parsed.state
   } else {
     state = parsed
+  }
+  if (state.rows !== undefined) {
+    state.rows = sanitizeRows(state.rows)
   }
   state.started_at = state.started_at ?? previousStartedAt
   state.updated_at = state.updated_at ?? new Date().toISOString()
@@ -141,6 +216,19 @@ const server = http.createServer(async (request, response) => {
     try {
       const body = await readBody(request)
       const parsed = JSON.parse(body)
+      const rawRows = parsed.state ? parsed.state.rows : parsed.rows
+      if (rawRows !== undefined && Array.isArray(rawRows)) {
+        const badRow = rawRows.find(
+          row => typeof row.key !== 'string' || typeof row.label !== 'string' ||
+            (row.tokens !== undefined && typeof row.tokens !== 'number') ||
+            (row.runtime_ms !== undefined && typeof row.runtime_ms !== 'number') ||
+            (row.calls !== undefined && typeof row.calls !== 'number')
+        )
+        if (badRow) {
+          sendJson(response, 400, { ok: false, error: 'Invalid row: key/label must be strings, numeric fields must be numbers' })
+          return
+        }
+      }
       updateStateFromPayload(parsed)
       broadcast()
       sendJson(response, 200, { ok: true })
@@ -175,6 +263,20 @@ const server = http.createServer(async (request, response) => {
   }
 
   sendJson(response, 404, { ok: false, error: 'Not found' })
+})
+
+server.on('error', (err) => {
+  if (!server.listening) {
+    process.stderr.write(`[monitor] listen failed: ${err.code || err.message}\n`, () => {
+      process.exit(1)
+    })
+  } else {
+    process.stderr.write(`[monitor] socket error: ${err.code || err.message}\n`)
+  }
+})
+
+server.on('listening', () => {
+  process.stderr.write(`[monitor] listening on ${args.port}\n`)
 })
 
 server.listen(args.port, '127.0.0.1')

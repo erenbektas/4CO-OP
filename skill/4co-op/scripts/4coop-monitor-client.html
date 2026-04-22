@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'">
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>4CO-OP Monitor</title>
@@ -756,30 +757,55 @@
     }
 
     function renderRows() {
-      rowsEl.innerHTML = ''
-      state.rows.forEach(row => {
+      rowsEl.replaceChildren()
+      for (const row of state.rows) {
         const button = document.createElement('button')
         const isInteractive = row.key !== 'total' && Boolean(getDetailCall(row))
-        const activeBadge = row.active ? '<span class="status-badge">Active</span>' : (row.key === 'total' ? '<span class="status-badge muted">Total</span>' : '')
-        button.className = `row ${row.key === 'total' ? 'total' : ''} ${row.active ? 'active' : ''} ${state.selected === row.key ? 'selected' : ''} ${isInteractive ? 'clickable' : ''}`
+        button.className = [
+          'row',
+          row.key === 'total' ? 'total' : '',
+          row.active ? 'active' : '',
+          state.selected === row.key ? 'selected' : '',
+          isInteractive ? 'clickable' : ''
+        ].filter(Boolean).join(' ')
         button.type = 'button'
         button.disabled = !isInteractive
         applyStageTheme(button, row.key)
-        button.innerHTML = `
-          <span class="row-stage">
-            <span class="dot ${row.active ? 'active' : ''}"></span>
-            <span class="row-label">${row.label}</span>
-          </span>
-          <span class="row-value">${formatTokens(row.tokens, row.exact_tokens)}</span>
-          <span class="row-value">${formatRuntime(row.runtime_ms)}</span>
-          <span class="row-value">${numberFormatter.format(row.calls ?? 0)}</span>
-          <span class="row-status">${activeBadge}</span>
-        `
-        if (isInteractive) {
-          button.addEventListener('click', () => toggleSelection(row.key))
+
+        const stage = document.createElement('span')
+        stage.className = 'row-stage'
+        const dot = document.createElement('span')
+        dot.className = `dot ${row.active ? 'active' : ''}`
+        const label = document.createElement('span')
+        label.className = 'row-label'
+        label.textContent = String(row.label ?? '')
+        stage.append(dot, label)
+
+        const tokens = document.createElement('span')
+        tokens.className = 'row-value'
+        tokens.textContent = formatTokens(row.tokens, row.exact_tokens)
+
+        const runtime = document.createElement('span')
+        runtime.className = 'row-value'
+        runtime.textContent = formatRuntime(row.runtime_ms)
+
+        const calls = document.createElement('span')
+        calls.className = 'row-value'
+        calls.textContent = numberFormatter.format(row.calls ?? 0)
+
+        const status = document.createElement('span')
+        status.className = 'row-status'
+        if (row.active || row.key === 'total') {
+          const badge = document.createElement('span')
+          badge.className = `status-badge ${row.active ? '' : 'muted'}`.trim()
+          badge.textContent = row.active ? 'Active' : 'Total'
+          status.append(badge)
         }
-        rowsEl.appendChild(button)
-      })
+
+        button.append(stage, tokens, runtime, calls, status)
+        if (isInteractive) button.addEventListener('click', () => toggleSelection(row.key))
+        rowsEl.append(button)
+      }
       updateChrome()
     }
 

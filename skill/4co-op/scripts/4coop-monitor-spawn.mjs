@@ -29,17 +29,23 @@ function commandExists(command) {
     return false
   }
 
+  if (!/^[A-Za-z][A-Za-z0-9._-]*$/.test(String(command))) {
+    return false
+  }
+
   if (process.platform === 'win32') {
     const whereProbe = spawnSync('where.exe', [command], { encoding: 'utf8' })
     if (!whereProbe.error && whereProbe.status === 0) {
       return true
     }
 
-    const escaped = String(command).replace(/'/g, "''")
+    const cmdB64 = Buffer.from(String(command)).toString('base64')
+    const psScript = `$cmd = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${cmdB64}')); Get-Command $cmd -ErrorAction Stop | Out-Null`
+    const encodedCmd = Buffer.from(psScript, 'utf16le').toString('base64')
     const powershellProbe = spawnSync('powershell.exe', [
       '-NoProfile',
-      '-Command',
-      `Get-Command '${escaped}' -ErrorAction Stop | Out-Null`
+      '-EncodedCommand',
+      encodedCmd
     ], {
       encoding: 'utf8'
     })
@@ -333,9 +339,53 @@ export async function ensureMonitor(paths, config, initialState) {
   const scriptPath = resolveBundledPath('scripts', '4coop-monitor-server.mjs')
   const child = spawn(process.execPath, [scriptPath, '--port', String(port)], {
     detached: true,
-    stdio: 'ignore'
+    stdio: ['ignore', 'ignore', 'pipe']
   })
+
+  await new Promise((resolve, reject) => {
+    let settled = false
+    let timer
+    let buffer = ''
+
+    const settle = (fn, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.stderr.off('data', onData)
+      child.off('exit', onExit)
+      if (fn === reject) {
+        try { child.kill() } catch {}
+      }
+      fn(value)
+    }
+
+    const onData = (chunk) => {
+      buffer += chunk.toString()
+      if (buffer.includes('[monitor] listening')) {
+        settle(resolve, undefined)
+      } else if (/\[monitor\] listen failed/.test(buffer)) {
+        settle(reject, new Error(`Monitor failed to start: ${buffer.trim()}`))
+      } else if (buffer.length > 10000) {
+        buffer = buffer.slice(-5000)
+      }
+    }
+
+    const onExit = (code) => {
+      settle(reject, new Error(`Monitor exited with code ${code} before listening`))
+    }
+
+    child.stderr.on('data', onData)
+    child.once('exit', onExit)
+
+    timer = setTimeout(() => {
+      settle(reject, new Error('Monitor startup timeout'))
+    }, 5000)
+    timer.unref()
+  })
+
   child.unref()
+  child.stderr.on('data', () => {})
+  child.stderr.unref()
 
   const healthy = await waitForHealth(port)
   if (!healthy) {

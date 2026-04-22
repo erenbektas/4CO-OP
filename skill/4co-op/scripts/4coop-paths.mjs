@@ -58,10 +58,12 @@ export function appendText(targetPath, value) {
   fs.appendFileSync(targetPath, value, 'utf8')
 }
 
+/** Returns a POSIX-style path for display and relay prompts only. Do NOT pass to Windows native shell commands. */
 export function toPosixPath(value) {
   return value.split(path.sep).join('/')
 }
 
+/** Returns a project-relative POSIX path for display/relay only. Do NOT pass to Windows native spawn/exec calls. */
 export function relativeProjectPath(projectRoot, absolutePath) {
   return toPosixPath(path.relative(projectRoot, absolutePath))
 }
