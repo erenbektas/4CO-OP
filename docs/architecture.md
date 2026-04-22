@@ -111,7 +111,7 @@ Per-run file that every stage reads + updates for the active run. Schema:
 
 `<repo-name>` is `path.basename(projectRoot)` and `<slug>` is `slugify(feature)` (the slugified feature title); both resolved in `buildWorktreeInfo` in `skill/4co-op/scripts/4coop-worktree.mjs`.
 
-`narrator_log` is a per-run array reserved for a future chat-transcript feature. The helper `appendNarratorEntry` in `skill/4co-op/scripts/4coop-state.mjs` exists but is not currently called by the orchestrator, so the array stays empty on every run. The live event stream (`run_start`, `run_end`, `stage_call`, `window_opened`, `window_closed`, `interruption`, `table_snapshot`, `comment_check_start`, `comment_check_end`) is written to the nightly log file, not to `state.json`; see `docs/privacy.md` and `skill/4co-op/scripts/4coop-logger.mjs`.
+`narrator_log` is a per-run array reserved for a future chat-transcript feature. The helper `appendNarratorEntry` in `skill/4co-op/scripts/4coop-state.mjs` exists but is not currently called by the orchestrator, so the array stays empty on every run. The live event stream is written to the nightly log file, not to `state.json`; event type strings are emitted from `logger.write(...)` call sites in `skill/4co-op/scripts/4coop-orchestrator.mjs` (for example: `run_start`, `run_end`, `stage_call`, `window_opened`, `window_closed`, `interruption`, `table_snapshot`, `comment_check_start`, `comment_check_end`). See also `docs/privacy.md` and `skill/4co-op/scripts/4coop-logger.mjs`.
 
 Why a file, not in-memory: subagents run in isolated contexts. The file is the contract between them.
 
@@ -298,7 +298,7 @@ skill/4co-op/
     ├── 4coop-monitor-server.mjs        # local tracker HTTP server
     ├── 4coop-monitor-spawn.mjs         # browser window spawner
     ├── 4coop-monitor-client.html       # tracker UI page
-    └── install.mjs                     # global + project install entry (see docs/install.md)
+    └── install.mjs                     # global + project install entry (skill/4co-op/scripts/install.mjs; see docs/install.md)
 ```
 
 ### Per-project runtime — `.4co-op/`
@@ -517,7 +517,7 @@ Before the first `/4co-op <feature>`:
 - [ ] `gh auth status` healthy (confirmed: <github-user>, `repo` scope)
 - [ ] `.4co-op/project.config.json` exists with `build`, `test`, `lint` keys
 - [ ] `.4co-op/install/4co-op/schemas/*.json` present and valid JSON Schema
-- [ ] `.claude/agents/*.md` frontmatter validated (`model`, `permissionMode`, `tools`)
+- [ ] `.claude/agents/*.md` (host-level agents directory, not `.claude/skills/4co-op/`) frontmatter validated (`model`, `permissionMode`, `tools`)
 - [ ] Narrator smoke test: call it with each `speaker` value and confirm the output starts with the exact tag from §5
 - [ ] Dry-run `/4co-op "rename README.md title"` — smallest change that exercises all 7 stages
 - [ ] Queue test: invoke `/4co-op A` then `/4co-op B` before A finishes — confirm B is queued, then auto-starts when A completes
