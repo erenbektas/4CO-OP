@@ -41,25 +41,48 @@ function isLoopbackRequest(request) {
 const MAX_CALL_STRING_LEN = 20000
 const MAX_CALL_TOTAL_BYTES = 200000
 
+function truncateString(value) {
+  if (value.length <= MAX_CALL_STRING_LEN) return value
+  return `${value.slice(0, MAX_CALL_STRING_LEN)}…[truncated ${value.length - MAX_CALL_STRING_LEN} chars]`
+}
+
+function sanitizeCallValue(value, seen) {
+  if (typeof value === 'string') return truncateString(value)
+  if (value == null || typeof value !== 'object') return value
+  if (seen.has(value)) {
+    throw new TypeError('Circular structure in call payload')
+  }
+  seen.add(value)
+  try {
+    if (Array.isArray(value)) {
+      return value.map(item => sanitizeCallValue(item, seen))
+    }
+    const output = {}
+    for (const [key, innerValue] of Object.entries(value)) {
+      output[key] = sanitizeCallValue(innerValue, seen)
+    }
+    return output
+  } finally {
+    seen.delete(value)
+  }
+}
+
 function sanitizeCall(call) {
   if (call == null || typeof call !== 'object') return undefined
   try {
-    // Use a replacer so strings are capped before entering the output buffer —
-    // avoids duplicating large strings during the intermediate stringify pass.
-    const json = JSON.stringify(call, (_key, value) => {
-      if (typeof value === 'string' && value.length > MAX_CALL_STRING_LEN) {
-        return `${value.slice(0, MAX_CALL_STRING_LEN)}…[truncated ${value.length - MAX_CALL_STRING_LEN} chars]`
-      }
-      return value
-    })
+    const sanitized = sanitizeCallValue(call, new WeakSet())
+    const json = JSON.stringify(sanitized)
     if (!json || json.length > MAX_CALL_TOTAL_BYTES) {
       return {
         _truncated: true,
         started_at: typeof call.started_at === 'string' ? call.started_at : undefined,
-        ended_at: typeof call.ended_at === 'string' ? call.ended_at : undefined
+        ended_at: typeof call.ended_at === 'string' ? call.ended_at : undefined,
+        stage: typeof call.stage === 'string' ? truncateString(call.stage) : undefined,
+        error_type: typeof call.error_type === 'string' ? truncateString(call.error_type) : undefined,
+        call_id: typeof call.call_id === 'string' || typeof call.call_id === 'number' ? call.call_id : undefined
       }
     }
-    return JSON.parse(json)
+    return sanitized
   } catch {
     return undefined
   }
