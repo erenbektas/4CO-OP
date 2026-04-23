@@ -20,7 +20,8 @@ const DEFAULT_CONFIG = {
     reviewer: { cli: 'claude', model: 'claude-opus-4-7', tag_display: 'Opus 4.7' },
     fixer: { cli: 'codex', model: 'gpt-5.4', tag_display: '5.4' },
     gatekeeper: { cli: 'codex', model: 'gpt-5.4', tag_display: '5.4' },
-    narrator: { cli: 'claude', model: 'claude-haiku-4-5', tag_display: 'Haiku 4.5' }
+    narrator: { cli: 'claude', model: 'claude-haiku-4-5', tag_display: 'Haiku 4.5' },
+    pr_writer: { cli: 'claude', model: 'claude-sonnet-4-6', tag_display: 'Sonnet 4.6' }
   },
   tags: {
     meta: '[4CO-OP]',
@@ -31,7 +32,11 @@ const DEFAULT_CONFIG = {
     reviewer: '[👓 Reviewer | {tag_display}]',
     fixer: '[🔧 Fixer | {tag_display}]',
     gatekeeper: '[⚖️ Gatekeeper | {tag_display}]',
-    narrator: '[4CO-OP]'
+    narrator: '[4CO-OP]',
+    pr_writer: '[✍️ PR Writer | {tag_display}]'
+  },
+  workspace: {
+    mode: 'in_place'
   },
   monitor_window: {
     enabled: true,
@@ -170,6 +175,11 @@ export function validateConfig(config) {
 
   if (!config.logging?.dir) {
     errors.push('logging.dir must be non-empty')
+  }
+
+  const workspaceMode = config.workspace?.mode
+  if (workspaceMode !== undefined && workspaceMode !== 'in_place' && workspaceMode !== 'worktree') {
+    errors.push('workspace.mode must be "in_place" or "worktree"')
   }
 
   return errors

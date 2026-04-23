@@ -36,7 +36,8 @@
         "reviewer": { "$ref": "#/definitions/modelConfig" },
         "fixer": { "$ref": "#/definitions/modelConfig" },
         "gatekeeper": { "$ref": "#/definitions/modelConfig" },
-        "narrator": { "$ref": "#/definitions/modelConfig" }
+        "narrator": { "$ref": "#/definitions/modelConfig" },
+        "pr_writer": { "$ref": "#/definitions/modelConfig" }
       }
     },
     "tags": {
@@ -62,7 +63,20 @@
         "reviewer": { "type": "string", "minLength": 1 },
         "fixer": { "type": "string", "minLength": 1 },
         "gatekeeper": { "type": "string", "minLength": 1 },
-        "narrator": { "type": "string", "minLength": 1 }
+        "narrator": { "type": "string", "minLength": 1 },
+        "pr_writer": { "type": "string", "minLength": 1 }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["in_place", "worktree"],
+          "default": "in_place",
+          "description": "Where the pipeline does its work. 'in_place' (default) creates a feat/<slug> branch in the current repo and autostashes any uncommitted changes. 'worktree' creates a sibling git worktree."
+        }
       }
     },
     "monitor_window": {
@@ -109,6 +123,52 @@
         "snapshot_interval_seconds_idle": {
           "type": "integer",
           "minimum": 1
+        }
+      }
+    },
+    "suspend": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Controls auto-suspend, heartbeat, and resume behavior for long-running stages.",
+      "properties": {
+        "auto_suspend_on_network_loss": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, the watchdog auto-suspends if a stage stream goes silent and the network probe fails."
+        },
+        "auto_resume_on_recovery": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, auto-suspended runs (network_loss only) auto-resume once the network probe recovers."
+        },
+        "stream_silence_timeout_ms": {
+          "type": "integer",
+          "minimum": 10000,
+          "default": 90000,
+          "description": "Duration of stream silence before the watchdog probes the network."
+        },
+        "network_probe_endpoints": {
+          "type": "array",
+          "items": { "type": "string", "format": "uri" },
+          "default": [
+            "https://api.anthropic.com",
+            "https://api.openai.com"
+          ]
+        },
+        "max_consecutive_probe_failures": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3
+        },
+        "lock_heartbeat_interval_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "default": 10000
+        },
+        "lock_heartbeat_stale_ms": {
+          "type": "integer",
+          "minimum": 10000,
+          "default": 120000
         }
       }
     }

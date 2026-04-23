@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { writeFileAtomic, writeJsonAtomic } from './4coop-atomic.mjs'
 
 export const SKILL_NAME = '4co-op'
 export const RUNTIME_DIRNAME = '.4co-op'
@@ -13,7 +14,8 @@ export const STAGE_KEYS = [
   'reviewer',
   'fixer',
   'gatekeeper',
-  'narrator'
+  'narrator',
+  'pr_writer'
 ]
 
 export const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -49,8 +51,11 @@ export function readJsonIfExists(targetPath) {
 }
 
 export function writeJson(targetPath, value) {
-  ensureDir(path.dirname(targetPath))
-  fs.writeFileSync(targetPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  writeJsonAtomic(targetPath, value)
+}
+
+export function writeTextFile(targetPath, value) {
+  writeFileAtomic(targetPath, String(value ?? ''))
 }
 
 export function appendText(targetPath, value) {
@@ -177,7 +182,8 @@ export function getRuntimePaths(projectRoot, runId = null) {
     reviewFile: runDir ? path.join(runDir, 'review.md') : null,
     reviewerInputFile: runDir ? path.join(runDir, 'reviewer-input.md') : null,
     relayDir: runDir ? path.join(runDir, 'relay') : null,
-    ndjsonDir: runDir ? path.join(runDir, 'raw') : null
+    ndjsonDir: runDir ? path.join(runDir, 'raw') : null,
+    stageInFlightFile: runDir ? path.join(runDir, 'stage-in-flight.json') : null
   }
 }
 

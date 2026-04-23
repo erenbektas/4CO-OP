@@ -7,6 +7,7 @@ const DISPLAY_ORDER = [
   'reviewer',
   'fixer',
   'gatekeeper',
+  'pr_writer',
   'narrator',
   'total'
 ]
@@ -118,6 +119,15 @@ export function createMonitorState(config) {
       'Haiku',
       config.tags.meta,
       stageModelInfo(config, 'narrator')
+    ),
+    pr_writer: createRow(
+      'pr_writer',
+      'PR Writer',
+      (config.tags.pr_writer ?? '[✍️ PR Writer | {tag_display}]').replace(
+        '{tag_display}',
+        config.models.pr_writer?.tag_display ?? 'Sonnet 4.6'
+      ),
+      stageModelInfo(config, 'pr_writer')
     ),
     total: createRow('total', 'Total Token Usage', '—')
   }

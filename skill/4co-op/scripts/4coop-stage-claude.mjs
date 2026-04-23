@@ -147,14 +147,31 @@ export async function runClaudeStage({
   prompt,
   cwd,
   timeoutMs = 20 * 60 * 1000,
-  onEvent = null
+  permissionMode = 'bypassPermissions',
+  onEvent = null,
+  sessionId = null,
+  resumeSessionId = null,
+  onSessionStarted = null,
+  onSpawn = null
 }) {
   return await new Promise((resolve, reject) => {
-    const args = ['-p', prompt, '--model', model, '--output-format', 'json']
+    const args = ['-p', prompt, '--model', model, '--output-format', 'json', '--permission-mode', permissionMode]
+    if (resumeSessionId) {
+      args.push('--resume', resumeSessionId)
+    } else if (sessionId) {
+      args.push('--session-id', sessionId)
+    }
+    const effectiveSessionId = resumeSessionId ?? sessionId ?? null
+    if (effectiveSessionId && typeof onSessionStarted === 'function') {
+      try { onSessionStarted(effectiveSessionId) } catch {}
+    }
     const child = spawn(cli, args, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe']
     })
+    if (typeof onSpawn === 'function') {
+      try { onSpawn(child) } catch {}
+    }
 
     let stdout = ''
     let stderr = ''
@@ -219,6 +236,14 @@ export async function runClaudeStage({
         return
       }
 
+      const envelopeSessionId = typeof envelope?.session_id === 'string'
+        ? envelope.session_id
+        : envelope?.structured?.session_id ?? null
+      const resolvedSessionId = effectiveSessionId ?? envelopeSessionId ?? null
+      if (resolvedSessionId && !effectiveSessionId && typeof onSessionStarted === 'function') {
+        try { onSessionStarted(resolvedSessionId) } catch {}
+      }
+
       resolve({
         exitCode,
         stdout,
@@ -226,7 +251,8 @@ export async function runClaudeStage({
         envelope,
         outputText,
         structured,
-        usage
+        usage,
+        sessionId: resolvedSessionId
       })
     })
   })

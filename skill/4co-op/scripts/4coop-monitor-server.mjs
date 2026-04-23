@@ -129,6 +129,60 @@ function runGit(cwd, args, timeoutMs = 10000) {
   })
 }
 
+function parseNameStatus(raw) {
+  return (raw || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      const [status, ...rest] = line.split(/\s+/)
+      return { status, path: rest.join(' ') }
+    })
+}
+
+function mergeChanges(committed, unstaged) {
+  const out = [...committed]
+  for (const entry of unstaged) {
+    if (!out.some(item => item.path === entry.path)) {
+      out.push(entry)
+    }
+  }
+  return out
+}
+
+function splitDiffByFile(raw) {
+  if (!raw) return []
+  const out = []
+  const lines = raw.split('\n')
+  let current = null
+  for (const line of lines) {
+    if (line.startsWith('diff --git ')) {
+      if (current) out.push(current)
+      // `diff --git a/<path> b/<path>` — prefer b/<path> for new filename.
+      const match = /diff --git a\/(.+) b\/(.+)/.exec(line)
+      const filePath = match ? match[2] : null
+      current = { path: filePath, diff: `${line}\n` }
+      continue
+    }
+    if (current) {
+      current.diff += `${line}\n`
+    }
+  }
+  if (current) out.push(current)
+  return out
+}
+
+function computeDiffStats(diff) {
+  if (!diff) return { additions: 0, deletions: 0 }
+  let additions = 0
+  let deletions = 0
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) additions += 1
+    else if (line.startsWith('-') && !line.startsWith('---')) deletions += 1
+  }
+  return { additions, deletions }
+}
+
 function getRunsDir() {
   if (!projectRoot) return null
   return path.join(projectRoot, '.4co-op', 'runs')
@@ -318,6 +372,12 @@ function buildDispatchArgs(command, body) {
       return []
     case 'set-base':
       return base ? ['--base', base] : []
+    case 'pause':
+      return []
+    case 'resume':
+      return []
+    case 'status':
+      return []
     default:
       return null
   }
@@ -475,35 +535,54 @@ const server = http.createServer(async (request, response) => {
         sendJson(response, 200, {
           ok: true,
           available: false,
-          reason: 'worktree not yet created',
+          reason: 'workspace not yet created',
           diff: '',
+          diff_by_file: [],
+          unstaged_diff: '',
           commits: '',
           changes: []
         })
         return
       }
-      const [diffResult, logResult, statusResult] = await Promise.all([
+      const [committedDiff, unstagedDiff, logResult, statusResult, unstagedStatus] = await Promise.all([
         runGit(worktreePath, ['diff', `${base}...HEAD`]),
+        runGit(worktreePath, ['diff', 'HEAD']),
         runGit(worktreePath, ['log', `${base}..HEAD`, '--oneline', '--stat']),
-        runGit(worktreePath, ['diff', `${base}...HEAD`, '--name-status'])
+        runGit(worktreePath, ['diff', `${base}...HEAD`, '--name-status']),
+        runGit(worktreePath, ['diff', 'HEAD', '--name-status'])
       ])
-      const changes = (statusResult.stdout || '')
-        .split('\n')
-        .map(line => line.trim())
-        .filter(Boolean)
-        .map(line => {
-          const [status, ...rest] = line.split(/\s+/)
-          return { status, path: rest.join(' ') }
-        })
+
+      const changes = parseNameStatus(statusResult.stdout)
+      const unstagedChanges = parseNameStatus(unstagedStatus.stdout).map(entry => ({ ...entry, unstaged: true }))
+      const allChanges = mergeChanges(changes, unstagedChanges)
+      const committedByFile = splitDiffByFile(committedDiff.stdout || '')
+      const unstagedByFile = splitDiffByFile(unstagedDiff.stdout || '')
+      const diffByFile = allChanges.map(change => {
+        const committed = committedByFile.find(entry => entry.path === change.path)
+        const unstaged = unstagedByFile.find(entry => entry.path === change.path)
+        const chunks = [committed?.diff, unstaged?.diff].filter(Boolean).join('\n')
+        const stats = computeDiffStats(chunks)
+        return {
+          path: change.path,
+          status: change.status,
+          unstaged: change.unstaged === true,
+          additions: stats.additions,
+          deletions: stats.deletions,
+          diff: chunks
+        }
+      })
+
       sendJson(response, 200, {
         ok: true,
         available: true,
         base,
         branch: runState?.worktree?.branch ?? null,
         worktree: worktreePath,
-        diff: diffResult.stdout || diffResult.stderr || '',
+        diff: committedDiff.stdout || committedDiff.stderr || '',
+        unstaged_diff: unstagedDiff.stdout || '',
+        diff_by_file: diffByFile,
         commits: logResult.stdout || '',
-        changes
+        changes: allChanges
       })
       return
     }
@@ -714,6 +793,27 @@ const server = http.createServer(async (request, response) => {
       })
 
     sendJson(response, 202, { ok: true, status: 'dispatched', command })
+    return
+  }
+
+  if (request.method === 'GET' && url.pathname === '/health') {
+    const payload = { ok: true, project_root: projectRoot }
+    if (projectRoot) {
+      try {
+        const scaffoldFile = path.join(projectRoot, '.4co-op', 'config.json')
+        payload.scaffolded = fs.existsSync(scaffoldFile)
+      } catch {
+        payload.scaffolded = false
+      }
+      try {
+        const branch = (await runGit(projectRoot, ['rev-parse', '--abbrev-ref', 'HEAD'], 5000)).stdout.trim()
+        const status = (await runGit(projectRoot, ['status', '--porcelain'], 5000)).stdout.trim()
+        payload.git = { branch, clean: status.length === 0 }
+      } catch {
+        payload.git = null
+      }
+    }
+    sendJson(response, 200, payload)
     return
   }
 

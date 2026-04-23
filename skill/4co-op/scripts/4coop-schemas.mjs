@@ -142,6 +142,12 @@ const validators = {
   },
   narrator(data) {
     return isObject(data) && typeof data.tagged_message === 'string'
+  },
+  pr_writer(data) {
+    return isObject(data) &&
+      typeof data.title === 'string' && data.title.trim().length > 0 &&
+      typeof data.body_markdown === 'string' && data.body_markdown.trim().length > 0 &&
+      typeof data.tagged_message === 'string'
   }
 }
 

@@ -153,37 +153,50 @@ function extractStructured(stage, outputText, stdout, stderr) {
   throw err
 }
 
-async function runCodex(args, { prompt, cwd, timeoutMs, outputFile, rawOutputPath, stage, onEvent }) {
+async function runCodex(args, { prompt, cwd, timeoutMs, outputFile, rawOutputPath, stage, onEvent, onSessionStarted, onSpawn }) {
   return await new Promise((resolve, reject) => {
     const child = spawn('codex', args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe']
     })
+    if (typeof onSpawn === 'function') {
+      try { onSpawn(child) } catch {}
+    }
 
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let sessionIdCaptured = null
     const timeout = setTimeout(() => {
       timedOut = true
       child.kill('SIGTERM')
     }, timeoutMs)
 
-    const lineStream = onEvent
-      ? createLineStream(line => {
-          try {
-            const parsed = JSON.parse(line)
-            onEvent(parsed, line)
-          } catch {
-            // Non-JSON lines (startup banners, warnings) — ignore for event stream
+    const handleEventInternal = parsed => {
+      if (!sessionIdCaptured && (parsed?.type === 'thread.started' || parsed?.type === 'session.started')) {
+        const id = parsed.thread_id ?? parsed.session_id ?? parsed.id ?? null
+        if (id) {
+          sessionIdCaptured = id
+          if (typeof onSessionStarted === 'function') {
+            try { onSessionStarted(id) } catch {}
           }
-        })
-      : null
+        }
+      }
+    }
+
+    const lineStream = createLineStream(line => {
+      try {
+        const parsed = JSON.parse(line)
+        handleEventInternal(parsed)
+        if (onEvent) onEvent(parsed, line)
+      } catch {
+        // Non-JSON lines (startup banners, warnings) — ignore for event stream
+      }
+    })
 
     child.stdout.on('data', chunk => {
       stdout += chunk.toString()
-      if (lineStream) {
-        lineStream.push(chunk)
-      }
+      lineStream.push(chunk)
     })
     child.stderr.on('data', chunk => {
       stderr += chunk.toString()
@@ -194,9 +207,7 @@ async function runCodex(args, { prompt, cwd, timeoutMs, outputFile, rawOutputPat
     })
     child.on('close', exitCode => {
       clearTimeout(timeout)
-      if (lineStream) {
-        lineStream.flush()
-      }
+      lineStream.flush()
       if (rawOutputPath) {
         fs.writeFileSync(rawOutputPath, stdout, 'utf8')
       }
@@ -227,7 +238,7 @@ async function runCodex(args, { prompt, cwd, timeoutMs, outputFile, rawOutputPat
         outputText,
         structured,
         usage,
-        sessionId: extractSessionId(events) ?? structured.session_id ?? null
+        sessionId: sessionIdCaptured ?? extractSessionId(events) ?? structured.session_id ?? null
       })
     })
 
@@ -245,9 +256,16 @@ export async function runCodexExec({
   rawOutputPath = null,
   sandboxMode = 'workspace-write',
   timeoutMs = 60 * 60 * 1000,
-  onEvent = null
+  onEvent = null,
+  onSessionStarted = null,
+  onSpawn = null
 }) {
-  const args = ['exec', '--cd', cwd, '-m', model, '-s', sandboxMode, '--color', 'never', '--json', '-o', outputFile]
+  const args = ['exec', '--cd', cwd, '-m', model, '--color', 'never', '--json', '-o', outputFile]
+  if (sandboxMode === 'workspace-write') {
+    args.push('--full-auto')
+  } else {
+    args.push('-s', sandboxMode)
+  }
   if (schemaPath) {
     args.push('--output-schema', schemaPath)
   }
@@ -260,7 +278,9 @@ export async function runCodexExec({
     outputFile,
     rawOutputPath,
     stage,
-    onEvent
+    onEvent,
+    onSessionStarted,
+    onSpawn
   })
 }
 
@@ -273,7 +293,9 @@ export async function runCodexResume({
   outputFile,
   rawOutputPath = null,
   timeoutMs = 60 * 60 * 1000,
-  onEvent = null
+  onEvent = null,
+  onSessionStarted = null,
+  onSpawn = null
 }) {
   const args = ['exec', 'resume', sessionId, '-m', model, '--full-auto', '--json', '-o', outputFile, '-']
   return await runCodex(args, {
@@ -283,6 +305,8 @@ export async function runCodexResume({
     outputFile,
     rawOutputPath,
     stage,
-    onEvent
+    onEvent,
+    onSessionStarted: onSessionStarted ?? (id => { /* noop, caller already has sessionId */ }),
+    onSpawn
   })
 }

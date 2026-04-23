@@ -45,19 +45,21 @@ test('live-event sink writes ndjson and broadcasts per event', () => {
   }
 })
 
-test('live-event sink accumulates per-category token totals', () => {
+test('live-event sink counts each classified event once per category', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), '4coop-live-'))
   try {
     const sink = createLiveEventSink({ runDir: tmp, stage: 'builder' })
-    sink.onEvent({ type: 'tool_call', name: 'Read', usage: { total_tokens: 100 } })
-    sink.onEvent({ type: 'tool_call', name: 'Read', usage: { total_tokens: 250 } })
-    sink.onEvent({ type: 'tool_call', name: 'Edit', usage: { total_tokens: 50 } })
-    sink.onEvent({ type: 'agent_message', usage: { input_tokens: 10, output_tokens: 90 } })
+    sink.onEvent({ type: 'tool_call', name: 'Read', input: { file_path: 'a' } })
+    sink.onEvent({ type: 'tool_call', name: 'Read', input: { file_path: 'b' } })
+    sink.onEvent({ type: 'tool_call', name: 'Edit', input: { file_path: 'c' } })
+    sink.onEvent({ type: 'agent_message', text: 'thinking out loud' })
 
-    assert.equal(sink.tokenAccounting.reads, 350)
-    assert.equal(sink.tokenAccounting.edits, 50)
-    assert.equal(sink.tokenAccounting.model_turns, 100)
-    assert.equal(sink.tokenAccounting.bash, 0)
+    assert.equal(sink.eventCounts.reads, 2)
+    assert.equal(sink.eventCounts.edits, 1)
+    assert.equal(sink.eventCounts.model_turns, 1)
+    assert.equal(sink.eventCounts.bash, 0)
+    // Legacy alias still returns the same counts.
+    assert.equal(sink.tokenAccounting.reads, 2)
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }
@@ -68,11 +70,37 @@ test('readLiveEventsTail returns last N parsed lines', () => {
   try {
     const sink = createLiveEventSink({ runDir: tmp, stage: 'builder' })
     for (let i = 0; i < 20; i += 1) {
-      sink.onEvent({ type: 'tool_call', name: 'Read', index: i })
+      sink.onEvent({ type: 'tool_call', name: 'Read', input: { file_path: `src/foo-${i}.ts` } })
     }
     const tail = readLiveEventsTail(tmp, 5)
     assert.equal(tail.length, 5)
-    assert.equal(tail[4].event.index, 19)
+    // The preview carries the tool name + last file path for the newest event.
+    assert.ok(tail[4].preview.includes('src/foo-19.ts'))
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('live-event sink classifies system/api_retry events', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), '4coop-live-'))
+  try {
+    const sink = createLiveEventSink({ runDir: tmp, stage: 'planner' })
+    sink.onEvent({
+      type: 'system',
+      subtype: 'api_retry',
+      attempt: 2,
+      max_retries: 5,
+      retry_delay_ms: 3000,
+      error_status: 529,
+      error: 'server_error'
+    })
+    const rows = readNdjson(path.join(tmp, 'live.ndjson'))
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].category, 'api_retry')
+    assert.equal(rows[0].kind, 'api_retry')
+    assert.match(rows[0].preview, /attempt 2\/5/)
+    assert.match(rows[0].preview, /retry in 3s/)
+    assert.equal(sink.eventCounts.api_retry, 1)
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }
@@ -82,12 +110,12 @@ test('readLiveEventsTail tolerates malformed lines', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), '4coop-live-'))
   try {
     const sink = createLiveEventSink({ runDir: tmp, stage: 'builder' })
-    sink.onEvent({ type: 'tool_call', name: 'Read' })
+    sink.onEvent({ type: 'tool_call', name: 'Read', input: { file_path: 'x' } })
     fs.appendFileSync(path.join(tmp, 'live.ndjson'), 'not-json-garbage\n', 'utf8')
-    sink.onEvent({ type: 'tool_call', name: 'Edit' })
+    sink.onEvent({ type: 'tool_call', name: 'Edit', input: { file_path: 'y' } })
     const tail = readLiveEventsTail(tmp, 10)
     assert.equal(tail.length, 2)
-    assert.equal(tail[1].event.name, 'Edit')
+    assert.equal(tail[1].summary, 'Edit')
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }

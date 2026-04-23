@@ -15,7 +15,8 @@ const AGENT_FILES = [
   ['4coop-spec-checker.md', 'spec_checker'],
   ['4coop-escalation.md', 'escalation'],
   ['4coop-pr-reviewer.md', 'reviewer'],
-  ['4coop-narrator.md', 'narrator']
+  ['4coop-narrator.md', 'narrator'],
+  ['4coop-pr-writer.md', 'pr_writer']
 ]
 
 const REQUIRED_PERMISSIONS = [

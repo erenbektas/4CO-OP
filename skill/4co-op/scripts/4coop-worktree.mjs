@@ -109,6 +109,68 @@ export function ensureWorktree(projectRoot, feature, base = null) {
   return { ...info, base: resolvedBase }
 }
 
+function timestampTag() {
+  const d = new Date()
+  const pad = value => String(value).padStart(2, '0')
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+}
+
+function isWorkingTreeDirty(projectRoot) {
+  const probe = runGit(projectRoot, ['status', '--porcelain'])
+  if (probe.status !== 0) {
+    throw new Error(probe.stderr.trim() || 'git status failed')
+  }
+  return probe.stdout.trim().length > 0
+}
+
+function currentBranch(projectRoot) {
+  const probe = runGit(projectRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])
+  if (probe.status !== 0) {
+    return null
+  }
+  const value = probe.stdout.trim()
+  return value === 'HEAD' ? null : value
+}
+
+export function ensureInPlaceBranch(projectRoot, feature, base = null) {
+  const resolvedBase = base ? detectBaseBranch(projectRoot, base) : detectBaseBranch(projectRoot)
+  const info = buildWorktreeInfo(projectRoot, feature)
+  const branch = info.branch
+
+  let autostashRef = null
+  if (isWorkingTreeDirty(projectRoot)) {
+    const stashMsg = `4co-op autostash ${timestampTag()}`
+    const stash = runGit(projectRoot, ['stash', 'push', '-u', '-m', stashMsg])
+    if (stash.status !== 0) {
+      throw new Error(stash.stderr.trim() || 'failed to autostash uncommitted changes')
+    }
+    autostashRef = stashMsg
+  }
+
+  const alreadyOnBranch = currentBranch(projectRoot) === branch
+  if (!alreadyOnBranch) {
+    const branchExists = runGit(projectRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0
+    const startPoint = runGit(projectRoot, ['rev-parse', '--verify', resolvedBase]).status === 0
+      ? resolvedBase
+      : `origin/${resolvedBase}`
+    const switchArgs = branchExists
+      ? ['switch', branch]
+      : ['switch', '-c', branch, startPoint]
+    const switched = runGit(projectRoot, switchArgs)
+    if (switched.status !== 0) {
+      throw new Error(switched.stderr.trim() || `Failed to switch to ${branch}`)
+    }
+  }
+
+  return {
+    branch,
+    path: projectRoot,
+    base: resolvedBase,
+    mode: 'in_place',
+    autostash_ref: autostashRef
+  }
+}
+
 export function removeWorktree(projectRoot, worktreePath, force = false) {
   const args = ['worktree', 'remove']
   if (force) {

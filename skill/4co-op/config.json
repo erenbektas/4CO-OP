@@ -41,6 +41,11 @@
       "cli": "claude",
       "model": "claude-haiku-4-5",
       "tag_display": "Haiku 4.5"
+    },
+    "pr_writer": {
+      "cli": "claude",
+      "model": "claude-sonnet-4-6",
+      "tag_display": "Sonnet 4.6"
     }
   },
   "tags": {
@@ -52,7 +57,11 @@
     "reviewer": "[👓 Reviewer | {tag_display}]",
     "fixer": "[🔧 Fixer | {tag_display}]",
     "gatekeeper": "[⚖️ Gatekeeper | {tag_display}]",
-    "narrator": "[4CO-OP]"
+    "narrator": "[4CO-OP]",
+    "pr_writer": "[✍️ PR Writer | {tag_display}]"
+  },
+  "workspace": {
+    "mode": "in_place"
   },
   "monitor_window": {
     "enabled": true,
@@ -65,5 +74,17 @@
     "dir": ".4co-op/logs",
     "snapshot_interval_seconds_active": 10,
     "snapshot_interval_seconds_idle": 60
+  },
+  "suspend": {
+    "auto_suspend_on_network_loss": true,
+    "auto_resume_on_recovery": false,
+    "stream_silence_timeout_ms": 90000,
+    "network_probe_endpoints": [
+      "https://api.anthropic.com",
+      "https://api.openai.com"
+    ],
+    "max_consecutive_probe_failures": 3,
+    "lock_heartbeat_interval_ms": 10000,
+    "lock_heartbeat_stale_ms": 120000
   }
 }

@@ -132,9 +132,23 @@
       font-family: var(--mono);
       font-size: 12px;
     }
+    .events-filter {
+      display: block;
+      width: 100%;
+      box-sizing: border-box;
+      margin-bottom: 10px;
+      padding: 6px 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+      border: 1px solid var(--panel-border);
+      border-radius: 6px;
+      background: var(--panel-soft);
+      color: var(--text);
+    }
+    .events-filter:focus { outline: none; border-color: var(--accent); }
     .event-row {
       display: grid;
-      grid-template-columns: auto auto 1fr;
+      grid-template-columns: auto auto auto 1fr;
       gap: 10px;
       padding: 4px 8px;
       border-radius: 4px;
@@ -143,12 +157,14 @@
     }
     .event-row .ts { color: var(--muted); }
     .event-row .stage { color: var(--accent); }
-    .event-row .summary { color: var(--text); white-space: pre-wrap; word-break: break-word; }
+    .event-row .summary { color: var(--text); font-weight: 600; }
+    .event-row .preview { color: var(--muted); white-space: pre-wrap; word-break: break-word; }
     .event-row[data-category="reads"] { border-left: 3px solid var(--accent); }
     .event-row[data-category="edits"] { border-left: 3px solid var(--warn); }
     .event-row[data-category="bash"] { border-left: 3px solid var(--success); }
     .event-row[data-category="model_turns"] { border-left: 3px solid var(--dim); }
     .event-row[data-category="other"] { border-left: 3px solid transparent; }
+    .event-row[data-category="lifecycle"] { border-left: 3px solid transparent; opacity: 0.65; }
 
     /* Structured stage views */
     .structured-block { margin-top: 12px; }
@@ -449,6 +465,20 @@
     .stage-dot.active { background: var(--accent); animation: pulse 1.2s infinite; box-shadow: 0 0 0 4px var(--accent-ring); }
     .stage-label { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .stage-stats { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .live-tick { color: var(--accent); font-weight: 600; }
+
+    .live-status-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 6px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .live-status-line .active-stage { color: var(--accent); font-weight: 600; }
+    .live-status-line .elapsed { color: var(--text); }
+    .live-status-line .last-event { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 480px; }
 
     .runs-list { display: flex; flex-direction: column; gap: 4px; }
     .run-row {
@@ -743,14 +773,56 @@
     }
     .file-row {
       display: grid;
-      grid-template-columns: 22px 1fr;
+      grid-template-columns: 22px 1fr auto auto;
       gap: 10px;
       padding: 5px 8px;
       border-radius: 4px;
       font-family: var(--mono);
       font-size: 12.5px;
+      text-decoration: none;
+      color: inherit;
+      align-items: center;
     }
     .file-row:hover { background: var(--panel-soft); }
+    .file-row .file-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-row .file-deltas { font-size: 11px; white-space: nowrap; }
+    .unstaged-tag {
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: var(--warn-soft);
+      color: var(--warn);
+      border: 1px solid var(--warn);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .diff-file-section {
+      margin: 0 0 16px;
+      border: 1px solid var(--panel-border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .diff-file-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      background: var(--panel-soft);
+      font-family: var(--mono);
+      font-size: 12.5px;
+      font-weight: 600;
+      border-bottom: 1px solid var(--panel-border);
+    }
+    .diff-file-body {
+      background: #1e2126;
+      color: #d8d4ce;
+      font-family: var(--mono);
+      font-size: 12px;
+      padding: 10px 12px;
+      overflow-x: auto;
+      white-space: pre;
+    }
     .file-status { font-weight: 600; text-align: center; }
     .file-status.M { color: var(--warn); }
     .file-status.A { color: var(--success); }
@@ -767,8 +839,8 @@
     }
     pre.diff {
       margin: 0;
-      padding: 14px 16px;
-      background: #1e2126;
+      padding: 0;
+      background: transparent;
       color: #d8d4ce;
       border-radius: 6px;
       overflow: auto;
@@ -846,6 +918,7 @@
         <span class="feature-text muted" id="featureText">No active run</span>
       </div>
       <div class="meta-row" id="metaRow"></div>
+      <div class="live-status-line" id="liveStatusLine" hidden></div>
     </section>
 
     <section class="action-bar" id="actionBar"></section>
@@ -921,6 +994,7 @@
             <div class="empty-state" id="eventsEmpty">No live events yet. Events will stream here during a run.</div>
             <div id="eventsBody" hidden>
               <div class="events-pills" id="eventsPills"></div>
+              <input type="text" class="events-filter" id="eventsFilter" placeholder="Filter events (tool name, file, text)…" autocomplete="off" />
               <div class="events-feed" id="eventsFeed"></div>
             </div>
           </div>
@@ -1006,7 +1080,8 @@
       logCache: new Map(),
       fetchInFlight: { plan: null, diff: null, review: null, log: null },
       events: [],
-      eventsBackfilledFor: null
+      eventsBackfilledFor: null,
+      eventsFilter: ''
     }
 
     const els = {
@@ -1016,6 +1091,7 @@
       statusPillLabel: document.getElementById('statusPillLabel'),
       featureText: document.getElementById('featureText'),
       metaRow: document.getElementById('metaRow'),
+      liveStatusLine: document.getElementById('liveStatusLine'),
       actionBar: document.getElementById('actionBar'),
       messages: document.getElementById('messages'),
       stageList: document.getElementById('stageList'),
@@ -1062,6 +1138,7 @@
       eventsBody: document.getElementById('eventsBody'),
       eventsPills: document.getElementById('eventsPills'),
       eventsFeed: document.getElementById('eventsFeed'),
+      eventsFilter: document.getElementById('eventsFilter'),
       advancedEmpty: document.getElementById('advancedEmpty'),
       advancedBody: document.getElementById('advancedBody'),
       advancedGrid: document.getElementById('advancedGrid'),
@@ -1288,6 +1365,25 @@
     function updateChrome() {
       const startedAt = state.metrics?.started_at ?? state.metrics?.updated_at
       els.uptime.textContent = formatUptime(startedAt)
+      const rows = state.metrics?.rows ?? []
+      const activeRow = rows.find(r => r.active && r.key !== 'idle' && r.key !== 'total' && r.current_call?.started_at)
+      if (activeRow) {
+        renderStageList()
+        const elapsedMs = Date.now() - new Date(activeRow.current_call.started_at).getTime()
+        const label = STAGE_META[activeRow.key]?.label ?? activeRow.label ?? activeRow.key
+        const modelLabel = activeRow.model ? ` · ${activeRow.model}` : ''
+        const lastEvent = [...state.events].reverse().find(entry => entry?.line?.stage === activeRow.key && entry?.line?.preview)
+        const lastPart = lastEvent ? lastEvent.line.preview : (lastEvent ? lastEvent.line.summary : '')
+        els.liveStatusLine.hidden = false
+        els.liveStatusLine.innerHTML = `
+          <span class="active-stage">▶ ${escapeHtml(label)}${escapeHtml(modelLabel)}</span>
+          <span class="elapsed">${escapeHtml(formatRuntime(Math.max(elapsedMs, 0)))} elapsed</span>
+          ${lastPart ? `<span class="last-event">${escapeHtml(lastPart)}</span>` : ''}
+        `
+      } else {
+        els.liveStatusLine.hidden = true
+        els.liveStatusLine.innerHTML = ''
+      }
     }
 
     function renderCockpitHeader() {
@@ -1362,16 +1458,31 @@
       }
 
       if (!session || status === undefined) {
+        const intro = document.createElement('span')
+        intro.className = 'hint'
+        intro.style.display = 'block'
+        intro.style.marginBottom = '6px'
+        intro.textContent = 'Describe the feature or change you want 4CO-OP to build. Press Ctrl/⌘+Enter to start.'
+        root.appendChild(intro)
         const textarea = document.createElement('textarea')
-        textarea.placeholder = 'Describe a feature (e.g. “add dark mode toggle”) and hit Start…'
-        textarea.rows = 1
+        textarea.placeholder = 'e.g. Add a dark-mode toggle to the settings page, wire it to the existing theme context, and cover it with a playwright test.'
+        textarea.rows = 3
         textarea.id = 'featureInput'
+        textarea.style.minHeight = '72px'
+        textarea.style.width = '100%'
         root.appendChild(textarea)
-        addButton('Start run', 'start', async () => {
+        const startBtn = addButton('Start run', 'start', async () => {
           const feature = textarea.value.trim()
           if (!feature) { textarea.focus(); return }
           await dispatch('start', { feature })
         }, { className: 'primary' })
+        textarea.addEventListener('keydown', event => {
+          if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+            event.preventDefault()
+            startBtn.click()
+          }
+        })
+        setTimeout(() => textarea.focus(), 0)
         const latestRunWithPr = (cockpit.runs || []).find(r => r.pr_number && r.status !== 'halted')
         if (latestRunWithPr) {
           addButton('Check PR comments', 'check', async () => {
@@ -1452,7 +1563,22 @@
         return
       }
 
+      if (status === 'suspended') {
+        const reason = cockpit.active?.suspend_reason ?? 'paused'
+        addSpinnerHint(`Run suspended (${reason}). Resume when ready — session ids are preserved.`)
+        addButton('Resume', 'resume', async () => {
+          await dispatch('resume', {})
+        }, { className: 'success' })
+        addButton('Cancel run', 'reject', async () => {
+          await dispatch('reject-active', {})
+        }, { className: 'danger' })
+        return
+      }
+
       addSpinnerHint('Pipeline is running — watch the stage list and Diff tab for live progress.')
+      addButton('Pause', 'pause', async () => {
+        await dispatch('pause', {})
+      })
       addButton('Check PR comments', 'check', async () => {
         await dispatch('check-comment', {})
       })
@@ -1476,10 +1602,18 @@
         btn.className = `stage-row ${row.key === 'total' ? 'total' : ''} ${state.selectedStage === row.key ? 'selected' : ''}`
         btn.type = 'button'
         btn.disabled = !isInteractive
+        const isRunning = Boolean(row.active && row.current_call?.started_at)
+        let statsHtml
+        if (isRunning) {
+          const elapsedMs = Date.now() - new Date(row.current_call.started_at).getTime()
+          statsHtml = `<span class="live-tick">● ${escapeHtml(formatRuntime(Math.max(elapsedMs, 0)))}</span>`
+        } else {
+          statsHtml = `${formatTokens(row.tokens, row.exact_tokens)} · ${formatRuntime(row.runtime_ms)}`
+        }
         btn.innerHTML = `
           <span class="stage-dot ${row.active ? 'active' : ''}"></span>
           <span class="stage-label">${escapeHtml(STAGE_META[row.key]?.label ?? row.label ?? row.key)}</span>
-          <span class="stage-stats">${formatTokens(row.tokens, row.exact_tokens)} · ${formatRuntime(row.runtime_ms)}</span>
+          <span class="stage-stats">${statsHtml}</span>
         `
         if (isInteractive) {
           btn.addEventListener('click', () => {
@@ -1768,45 +1902,12 @@
     }
 
     /* ----- Events tab ----- */
-    function summarizeEvent(line) {
-      const event = line?.event ?? {}
-      const type = event.type ?? event.event ?? line.summary ?? 'event'
-      if (type === 'tool_call' || type === 'tool_use' || type === 'tool_call_started') {
-        const name = event.name ?? event.tool ?? event.tool_name ?? 'tool'
-        const args = event.arguments ?? event.args ?? event.input ?? {}
-        if (name === 'Read' || name === 'Glob' || name === 'Grep') {
-          const target = args.file_path ?? args.path ?? args.pattern ?? ''
-          return `Read ${target}`
-        }
-        if (name === 'Edit' || name === 'Write' || name === 'MultiEdit') {
-          const target = args.file_path ?? args.path ?? ''
-          return `Edit ${target}`
-        }
-        if (name === 'Bash') {
-          const cmd = String(args.command ?? '').slice(0, 80)
-          return `Bash "${cmd}"`
-        }
-        return `Tool: ${name}`
-      }
-      if (type === 'tool_output' || type === 'tool_result') {
-        const name = event.name ?? event.tool ?? 'tool'
-        return `${name} → result`
-      }
-      if (type === 'agent_message' || type === 'message' || type === 'assistant_message') {
-        const text = event.text ?? event.content ?? event.message ?? ''
-        const str = typeof text === 'string' ? text : JSON.stringify(text)
-        return `💬 ${str.slice(0, 120)}`
-      }
-      if (type === 'token_count' || type === 'usage') {
-        return null
-      }
-      return String(type)
-    }
-
     function appendEventRow(line) {
-      const summary = summarizeEvent(line)
-      if (summary === null) return
-      state.events.push({ line, summary })
+      if (!line) return
+      // Drop noisy streaming deltas and pure usage bookkeeping; live-events.mjs
+      // already classifies these with kind='delta' / kind='usage'.
+      if (line.kind === 'delta' || line.kind === 'usage') return
+      state.events.push({ line, summary: line.summary ?? '', preview: line.preview ?? '' })
       if (state.events.length > MAX_EVENT_ROWS) {
         state.events.splice(0, state.events.length - MAX_EVENT_ROWS)
       }
@@ -1824,29 +1925,43 @@
 
       const totals = state.metrics?.rows?.find(r => r.key === 'total')?.event_tokens ?? null
       const pillSpecs = [
-        { key: 'reads', label: 'reads' },
-        { key: 'edits', label: 'edits' },
-        { key: 'bash', label: 'bash' },
-        { key: 'model_turns', label: 'model turns' },
-        { key: 'other', label: 'other' }
+        { key: 'reads', label: 'Reads' },
+        { key: 'edits', label: 'Edits' },
+        { key: 'bash', label: 'Bash' },
+        { key: 'model_turns', label: 'Model turns' },
+        { key: 'other', label: 'Other' }
       ]
       els.eventsPills.innerHTML = pillSpecs.map(spec => {
         const value = totals ? numberOf(totals[spec.key]) : 0
-        return `<span class="events-pill"><span class="label">${escapeHtml(spec.label)}</span>${formatTokens(value)}</span>`
+        return `<span class="events-pill"><span class="label">${escapeHtml(spec.label)}</span>${escapeHtml(String(value))}</span>`
       }).join('')
 
-      const latest = state.events.slice(-400).reverse()
-      els.eventsFeed.innerHTML = latest.map(entry => {
-        const { line, summary } = entry
-        const ts = formatClock(new Date(line.ts).toISOString())
+      const filterNeedle = (state.eventsFilter || '').toLowerCase()
+      const latest = state.events.slice(-500).reverse()
+      const rendered = []
+      for (const entry of latest) {
+        const line = entry.line ?? entry
+        if (!line || line.kind === 'delta' || line.kind === 'usage') continue
+        const summary = line.summary ?? entry.summary ?? ''
+        const preview = line.preview ?? entry.preview ?? ''
         const stage = line.stage ?? '—'
-        const category = line.category ?? 'other'
-        return `<div class="event-row" data-category="${escapeHtml(category)}">
+        const category = line.category ?? (line.kind === 'lifecycle' ? 'lifecycle' : 'other')
+        if (filterNeedle) {
+          const haystack = `${stage} ${summary} ${preview}`.toLowerCase()
+          if (!haystack.includes(filterNeedle)) continue
+        }
+        const ts = formatClock(new Date(line.ts).toISOString())
+        const previewHtml = preview
+          ? `<span class="preview">${escapeHtml(preview)}</span>`
+          : ''
+        rendered.push(`<div class="event-row" data-category="${escapeHtml(category)}">
           <span class="ts">${escapeHtml(ts)}</span>
           <span class="stage">[${escapeHtml(stage)}]</span>
           <span class="summary">${escapeHtml(summary)}</span>
-        </div>`
-      }).join('')
+          ${previewHtml}
+        </div>`)
+      }
+      els.eventsFeed.innerHTML = rendered.join('')
     }
 
     async function backfillEvents() {
@@ -1947,6 +2062,10 @@
       } catch { renderDiffPanel(null) }
     }
 
+    function fileSlug(filePath) {
+      return `diff-file-${String(filePath).replace(/[^a-zA-Z0-9]+/g, '-')}`
+    }
+
     function renderDiffPanel(data) {
       if (!data || !data.available) {
         els.diffEmpty.hidden = false
@@ -1960,26 +2079,64 @@
       }
       els.diffEmpty.hidden = true
       els.diffBody.hidden = false
-      const changes = data.changes ?? []
-      const adds = changes.filter(c => c.status === 'A').length
-      const mods = changes.filter(c => c.status === 'M').length
-      const dels = changes.filter(c => c.status === 'D').length
+
+      const files = Array.isArray(data.diff_by_file) && data.diff_by_file.length > 0
+        ? data.diff_by_file
+        : (data.changes || []).map(change => ({ path: change.path, status: change.status, additions: 0, deletions: 0, diff: '' }))
+
+      const totalAdditions = files.reduce((sum, f) => sum + (f.additions || 0), 0)
+      const totalDeletions = files.reduce((sum, f) => sum + (f.deletions || 0), 0)
+      const hasUnstaged = files.some(f => f.unstaged)
       els.diffSummary.innerHTML = [
         `<span>base <strong>${escapeHtml(data.base || '')}</strong></span>`,
         `<span>branch <strong>${escapeHtml(data.branch || '')}</strong></span>`,
-        `<span>${changes.length} files</span>`,
-        `<span><span style="color:var(--success)">+${adds}</span> / <span style="color:var(--warn)">~${mods}</span> / <span style="color:var(--danger)">-${dels}</span></span>`
-      ].join('')
-      els.diffFiles.innerHTML = changes.length === 0
+        `<span>${files.length} files</span>`,
+        `<span><span style="color:var(--success)">+${totalAdditions}</span> / <span style="color:var(--danger)">-${totalDeletions}</span></span>`,
+        hasUnstaged ? '<span style="color:var(--warn)">• includes uncommitted changes</span>' : ''
+      ].filter(Boolean).join('')
+
+      els.diffFiles.innerHTML = files.length === 0
         ? '<div class="hint">No files changed yet.</div>'
-        : changes.map(c => `<div class="file-row"><span class="file-status ${escapeHtml(c.status.charAt(0))}">${escapeHtml(c.status)}</span><span>${escapeHtml(c.path)}</span></div>`).join('')
+        : files.map(file => {
+          const statusChar = (file.status || 'M').charAt(0)
+          const unstagedTag = file.unstaged ? '<span class="unstaged-tag">uncommitted</span>' : ''
+          return `<a class="file-row" href="#${escapeHtml(fileSlug(file.path))}" data-diff-target="${escapeHtml(fileSlug(file.path))}">
+              <span class="file-status ${escapeHtml(statusChar)}">${escapeHtml(statusChar)}</span>
+              <span class="file-path">${escapeHtml(file.path)}</span>
+              <span class="file-deltas"><span style="color:var(--success)">+${file.additions || 0}</span> <span style="color:var(--danger)">-${file.deletions || 0}</span></span>
+              ${unstagedTag}
+            </a>`
+        }).join('')
+
       if (data.commits) {
         els.diffCommits.hidden = false
         els.diffCommits.textContent = data.commits
       } else {
         els.diffCommits.hidden = true
       }
-      els.diffPre.innerHTML = data.diff ? renderDiff(data.diff) : '<span style="color:#8c8b88">No diff to show.</span>'
+
+      if (files.length === 0) {
+        els.diffPre.innerHTML = '<span style="color:#8c8b88">No diff to show.</span>'
+      } else {
+        els.diffPre.innerHTML = files.map(file => `
+          <section class="diff-file-section" id="${escapeHtml(fileSlug(file.path))}">
+            <header class="diff-file-header">
+              <span class="file-path">${escapeHtml(file.path)}</span>
+              <span class="file-deltas"><span style="color:var(--success)">+${file.additions || 0}</span> <span style="color:var(--danger)">-${file.deletions || 0}</span>${file.unstaged ? ' · <span style="color:var(--warn)">uncommitted</span>' : ''}</span>
+            </header>
+            <div class="diff-file-body">${file.diff ? renderDiff(file.diff) : '<span style="color:var(--muted)">no hunks (file status only)</span>'}</div>
+          </section>
+        `).join('')
+      }
+
+      // Smooth-scroll sidebar clicks to the matching section.
+      els.diffFiles.querySelectorAll('[data-diff-target]').forEach(anchor => {
+        anchor.addEventListener('click', event => {
+          event.preventDefault()
+          const target = document.getElementById(anchor.dataset.diffTarget)
+          if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        })
+      })
     }
 
     async function refreshReview(force = false) {
@@ -2390,6 +2547,13 @@
     els.advancedSave.addEventListener('click', saveAdvancedConfig)
     els.advancedReset.addEventListener('click', resetAdvancedDraft)
 
+    if (els.eventsFilter) {
+      els.eventsFilter.addEventListener('input', () => {
+        state.eventsFilter = els.eventsFilter.value
+        if (state.activeTab === 'events') renderEventsTab()
+      })
+    }
+
     syncTabs()
     renderCockpitHeader()
     renderActionBar()
@@ -2401,10 +2565,17 @@
     setInterval(updateChrome, 1000)
     setInterval(() => {
       // Poll diff/log periodically when viewing a live run — files don't push via SSE yet.
-      if ((state.activeTab === 'diff' || state.activeTab === 'log') && state.cockpit?.dispatch_busy !== true) {
-        refreshActiveTab(true)
+      if (state.activeTab === 'diff' || state.activeTab === 'log') {
+        const activeStage = state.metrics?.active_stage
+        const writingStage = activeStage === 'builder' || activeStage === 'fixer'
+        // Poll more aggressively while an editing stage is live so the diff stays fresh.
+        if (writingStage || state.cockpit?.dispatch_busy) {
+          refreshActiveTab(true)
+        } else {
+          refreshActiveTab(false)
+        }
       }
-    }, 5000)
+    }, 4000)
   </script>
 </body>
 </html>
