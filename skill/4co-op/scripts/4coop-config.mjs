@@ -1,24 +1,27 @@
-import fs from 'node:fs'
-import path from 'node:path'
 import {
   STAGE_KEYS,
+  getRuntimePaths,
   pathExists,
   readJsonIfExists,
-  readTextIfExists,
-  resolveConfigLookup
+  resolveConfigLookup,
+  writeJson
 } from './4coop-paths.mjs'
+import { proposeProjectCommands as detectProjectCommands } from './4coop-detect.mjs'
+
+const CURRENT_CONFIG_VERSION = 2
 
 const DEFAULT_CONFIG = {
-  version: 1,
+  version: CURRENT_CONFIG_VERSION,
   models: {
     planner: { cli: 'claude', model: 'claude-opus-4-7', context: '1m', tag_display: 'Opus 4.7 1M' },
-    builder: { cli: 'codex', model: 'gpt-5.3-codex', tag_display: '5.3-Codex' },
-    spec_checker: { cli: 'claude', model: 'claude-sonnet-4-6', tag_display: 'Sonnet 4.6' },
+    builder: { cli: 'codex', model: 'gpt-5.4', tag_display: '5.4' },
+    spec_checker: { cli: 'claude', model: 'claude-sonnet-4-6', tag_display: 'Sonnet 4.6', escalation_model: 'claude-opus-4-7' },
     escalation: { cli: 'claude', model: 'claude-opus-4-7', tag_display: 'Opus 4.7' },
     reviewer: { cli: 'claude', model: 'claude-opus-4-7', tag_display: 'Opus 4.7' },
-    fixer: { cli: 'codex', model: 'gpt-5.3-codex', tag_display: '5.3-Codex' },
+    fixer: { cli: 'codex', model: 'gpt-5.4', tag_display: '5.4' },
     gatekeeper: { cli: 'codex', model: 'gpt-5.4', tag_display: '5.4' },
-    narrator: { cli: 'claude', model: 'claude-haiku-4-5', tag_display: 'Haiku 4.5' }
+    narrator: { cli: 'claude', model: 'claude-haiku-4-5', tag_display: 'Haiku 4.5' },
+    pr_writer: { cli: 'claude', model: 'claude-sonnet-4-6', tag_display: 'Sonnet 4.6' }
   },
   tags: {
     meta: '[4CO-OP]',
@@ -29,19 +32,26 @@ const DEFAULT_CONFIG = {
     reviewer: '[👓 Reviewer | {tag_display}]',
     fixer: '[🔧 Fixer | {tag_display}]',
     gatekeeper: '[⚖️ Gatekeeper | {tag_display}]',
-    narrator: '[4CO-OP]'
+    narrator: '[4CO-OP]',
+    pr_writer: '[✍️ PR Writer | {tag_display}]'
+  },
+  workspace: {
+    mode: 'in_place'
   },
   monitor_window: {
     enabled: true,
     port: 0,
     auto_launch: true,
-    browser: 'auto'
+    browser: 'system'
   },
   logging: {
     enabled: true,
     dir: '.4co-op/logs',
     snapshot_interval_seconds_active: 10,
     snapshot_interval_seconds_idle: 60
+  },
+  workflow: {
+    default_base_branch: ''
   }
 }
 
@@ -49,7 +59,63 @@ export function getDefaultConfig() {
   return JSON.parse(JSON.stringify(DEFAULT_CONFIG))
 }
 
-function deepMerge(base, override) {
+function upgradeConfigObject(config) {
+  const next = JSON.parse(JSON.stringify(config))
+  const startingVersion = Number.isInteger(next.version) ? next.version : 1
+  let changed = false
+
+  if (startingVersion < 2) {
+    // v1 default for monitor_window.browser was "auto" (preferred Chrome/Edge/Brave).
+    // v2 default is "system" — the OS default browser. Rewrite only the stale default;
+    // preserve any explicit non-auto choice the user had made.
+    if (next.monitor_window && next.monitor_window.browser === 'auto') {
+      next.monitor_window.browser = 'system'
+      changed = true
+    }
+
+    // v1 defaults for builder/fixer were gpt-5.3-codex; v2 promotes them to gpt-5.4.
+    // Only rewrite when the user is on the stale default — explicit overrides stay put.
+    for (const stage of ['builder', 'fixer']) {
+      const stageConfig = next.models?.[stage]
+      if (stageConfig && stageConfig.model === 'gpt-5.3-codex') {
+        stageConfig.model = 'gpt-5.4'
+        if (stageConfig.tag_display === '5.3-Codex') {
+          stageConfig.tag_display = '5.4'
+        }
+        changed = true
+      }
+    }
+  }
+
+  if (next.version !== CURRENT_CONFIG_VERSION) {
+    next.version = CURRENT_CONFIG_VERSION
+    changed = true
+  }
+
+  return { config: next, changed }
+}
+
+export function migrateProjectConfig(projectRoot) {
+  const paths = getRuntimePaths(projectRoot)
+  if (!pathExists(paths.projectConfigOverridePath)) {
+    return { migrated: false, reason: 'no-project-config' }
+  }
+
+  const existing = readJsonIfExists(paths.projectConfigOverridePath)
+  if (!existing || typeof existing !== 'object') {
+    return { migrated: false, reason: 'invalid-project-config' }
+  }
+
+  const { config, changed } = upgradeConfigObject(existing)
+  if (!changed) {
+    return { migrated: false, reason: 'already-current' }
+  }
+
+  writeJson(paths.projectConfigOverridePath, config)
+  return { migrated: true, from: existing.version ?? null, to: CURRENT_CONFIG_VERSION }
+}
+
+export function deepMerge(base, override) {
   if (override === undefined) {
     return base
   }
@@ -111,6 +177,11 @@ export function validateConfig(config) {
     errors.push('logging.dir must be non-empty')
   }
 
+  const workspaceMode = config.workspace?.mode
+  if (workspaceMode !== undefined && workspaceMode !== 'in_place' && workspaceMode !== 'worktree') {
+    errors.push('workspace.mode must be "in_place" or "worktree"')
+  }
+
   return errors
 }
 
@@ -153,13 +224,6 @@ export function validateProjectCommands(projectCommands) {
     }
   }
 
-  if (!String(projectCommands.build ?? '').trim()) {
-    errors.push('build command cannot be empty')
-  }
-  if (!String(projectCommands.lint ?? '').trim()) {
-    errors.push('lint command cannot be empty')
-  }
-
   return errors
 }
 
@@ -169,80 +233,6 @@ export function projectCommandsReady(projectCommands) {
     validateProjectCommands(projectCommands).length === 0
 }
 
-function summarizeNodeProject(packageJsonPath) {
-  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'))
-  const scripts = packageJson.scripts ?? {}
-  const build = scripts.build ? 'npm run build' : ''
-  const test = scripts.test ? 'npm test' : ''
-  const lint = scripts.lint ? 'npm run lint' : ''
-  return {
-    detected_stack: 'Node',
-    proposed_build: build,
-    proposed_test: test,
-    proposed_lint: lint,
-    confidence: scripts.build || scripts.test || scripts.lint ? 0.95 : 0.65,
-    summary: 'Looks like a Node project.'
-  }
-}
-
-function summarizePythonProject(projectRoot) {
-  const pyprojectPath = path.join(projectRoot, 'pyproject.toml')
-  const pyproject = readTextIfExists(pyprojectPath) ?? ''
-  const hasPytest = /\[tool\.pytest\]/.test(pyproject) || pathExists(path.join(projectRoot, 'pytest.ini'))
-  return {
-    detected_stack: 'Python',
-    proposed_build: 'python -m build',
-    proposed_test: hasPytest ? 'pytest' : '',
-    proposed_lint: 'ruff check .',
-    confidence: hasPytest ? 0.75 : 0.65,
-    summary: 'Looks like a Python project.'
-  }
-}
-
 export function proposeProjectCommands(projectRoot) {
-  const packageJsonPath = path.join(projectRoot, 'package.json')
-  if (pathExists(packageJsonPath)) {
-    return summarizeNodeProject(packageJsonPath)
-  }
-  if (pathExists(path.join(projectRoot, 'pyproject.toml'))) {
-    return summarizePythonProject(projectRoot)
-  }
-  if (pathExists(path.join(projectRoot, 'go.mod'))) {
-    return {
-      detected_stack: 'Go',
-      proposed_build: 'go build ./...',
-      proposed_test: 'go test ./...',
-      proposed_lint: 'go vet ./...',
-      confidence: 0.8,
-      summary: 'Looks like a Go project.'
-    }
-  }
-  if (pathExists(path.join(projectRoot, 'Cargo.toml'))) {
-    return {
-      detected_stack: 'Rust',
-      proposed_build: 'cargo build',
-      proposed_test: 'cargo test',
-      proposed_lint: 'cargo clippy -- -D warnings',
-      confidence: 0.8,
-      summary: 'Looks like a Rust project.'
-    }
-  }
-  if (pathExists(path.join(projectRoot, 'Makefile'))) {
-    return {
-      detected_stack: 'Generic',
-      proposed_build: 'make build',
-      proposed_test: 'make test',
-      proposed_lint: 'make lint',
-      confidence: 0.55,
-      summary: 'I found a Makefile, so I can start from the usual make targets.'
-    }
-  }
-  return {
-    detected_stack: 'Unknown',
-    proposed_build: '',
-    proposed_test: '',
-    proposed_lint: '',
-    confidence: 0.2,
-    summary: 'I could not confidently detect build, test, and lint commands from the project files I found.'
-  }
+  return detectProjectCommands(projectRoot)
 }

@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "body_markdown",
+    "tagged_message"
+  ],
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 140,
+      "description": "PR title, under 140 characters, no trailing period."
+    },
+    "body_markdown": {
+      "type": "string",
+      "minLength": 1,
+      "description": "GitHub-flavored markdown body for the PR. Should include a summary, acceptance checklist state, and test plan."
+    },
+    "tagged_message": {
+      "type": "string",
+      "description": "Short chat message starting with the PR Writer tag, announcing what was generated."
+    }
+  }
+}

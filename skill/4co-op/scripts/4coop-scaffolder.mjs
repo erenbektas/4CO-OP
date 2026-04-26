@@ -8,14 +8,15 @@ import {
   pathExists,
   readJsonIfExists
 } from './4coop-paths.mjs'
-import { getDefaultConfig, loadConfig } from './4coop-config.mjs'
+import { getDefaultConfig, loadConfig, migrateProjectConfig } from './4coop-config.mjs'
 
 const AGENT_FILES = [
   ['4coop-planner.md', 'planner'],
   ['4coop-spec-checker.md', 'spec_checker'],
   ['4coop-escalation.md', 'escalation'],
   ['4coop-pr-reviewer.md', 'reviewer'],
-  ['4coop-narrator.md', 'narrator']
+  ['4coop-narrator.md', 'narrator'],
+  ['4coop-pr-writer.md', 'pr_writer']
 ]
 
 const REQUIRED_PERMISSIONS = [
@@ -220,6 +221,7 @@ export function refreshAgentsFromConfig(projectRoot) {
   if (!isProjectScaffoldComplete(projectRoot)) {
     return false
   }
+  migrateProjectConfig(projectRoot)
   const config = loadConfig(projectRoot)
   syncAgents(projectRoot, config)
   return true

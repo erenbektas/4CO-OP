@@ -58,11 +58,11 @@ Default model map:
 | Stage | Default CLI | Default Model | Default Tag |
 | --- | --- | --- | --- |
 | planner | `claude` | `claude-opus-4-7` | `Opus 4.7 1M` |
-| builder | `codex` | `gpt-5.3-codex` | `5.3-Codex` |
+| builder | `codex` | `gpt-5.4` | `5.4` |
 | spec_checker | `claude` | `claude-sonnet-4-6` | `Sonnet 4.6` |
 | escalation | `claude` | `claude-opus-4-7` | `Opus 4.7` |
 | reviewer | `claude` | `claude-opus-4-7` | `Opus 4.7` |
-| fixer | `codex` | `gpt-5.3-codex` | `5.3-Codex` |
+| fixer | `codex` | `gpt-5.4` | `5.4` |
 | gatekeeper | `codex` | `gpt-5.4` | `5.4` |
 | narrator | `claude` | `claude-haiku-4-5` | `Haiku 4.5` |
 
@@ -114,8 +114,8 @@ Keys:
 Notes:
 
 - `port: 0` means choose a free port automatically
-- `browser: "auto"` is the default cross-platform choice
-- `browser: "system"` forces the default URL opener
+- `browser: "system"` is the default and opens the tracker in the OS default browser
+- `browser: "auto"` prefers an app-style window via Chrome/Edge/Brave when one is installed
 - explicit names like `edge`, `chrome`, and `brave` are supported
 - an executable path can also be used
 
@@ -149,8 +149,8 @@ Notes:
     },
     "builder": {
       "cli": "codex",
-      "model": "gpt-5.3-codex",
-      "tag_display": "5.3-Codex"
+      "model": "gpt-5.4",
+      "tag_display": "5.4"
     },
     "spec_checker": {
       "cli": "claude",
@@ -169,8 +169,8 @@ Notes:
     },
     "fixer": {
       "cli": "codex",
-      "model": "gpt-5.3-codex",
-      "tag_display": "5.3-Codex"
+      "model": "gpt-5.4",
+      "tag_display": "5.4"
     },
     "gatekeeper": {
       "cli": "codex",
@@ -198,7 +198,7 @@ Notes:
     "enabled": true,
     "port": 0,
     "auto_launch": true,
-    "browser": "auto"
+    "browser": "system"
   },
   "logging": {
     "enabled": true,

@@ -3,3 +3,6 @@ AGENTS.md
 # 4CO-OP local install and runtime artifacts
 .4co-op/
 .claude/
+# macOS cruft
+.DS_Store
+**/.DS_Store

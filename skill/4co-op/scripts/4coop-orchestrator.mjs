@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
+import { randomUUID } from 'node:crypto'
 import {
   buildRunId,
   ensureRuntimeDirs,
@@ -17,8 +18,10 @@ import {
 import {
   approvalPrompt,
   awaitingPrompt,
+  baseBranchInvalid,
+  baseBranchSet,
+  branchList,
   configHelp,
-  configRequirements,
   configProposal,
   halted,
   mergeReadyHint,
@@ -41,12 +44,18 @@ import {
   validateProjectCommands
 } from './4coop-config.mjs'
 import {
+  collectManifestSnippets
+} from './4coop-detect.mjs'
+import {
   acquireLock,
   enqueue,
   lockIsFresh,
+  markLockResumed,
+  markLockSuspended,
   readLock,
   releaseLock,
-  shiftQueue
+  shiftQueue,
+  touchLockHeartbeat
 } from './4coop-lock.mjs'
 import {
   beginStageCall,
@@ -57,22 +66,110 @@ import {
   summarizeMonitorForLog
 } from './4coop-metrics.mjs'
 import { createLogger } from './4coop-logger.mjs'
-import { ensureMonitor, postMonitorState, shutdownMonitor } from './4coop-monitor-spawn.mjs'
+import { ensureMonitor, nudgeCockpit, postMonitorState, postStageEvent, shutdownMonitor } from './4coop-monitor-spawn.mjs'
+import { createLiveEventSink } from './4coop-live-events.mjs'
+import { createNetworkWatchdog } from './4coop-network-watchdog.mjs'
 import { createPlannerRelayPrompt, createStageRelayPrompt, writeRelayFile } from './4coop-relay.mjs'
 import {
   clearActiveSession,
+  clearStageInFlight,
   createInitialRunState,
+  getLatestSessionId,
   loadActiveSession,
+  markStateResumed,
+  markStateSuspended,
+  readStageInFlight,
+  recordSessionId,
   saveActiveSession,
-  saveRunState
+  saveRunState,
+  touchStageInFlight,
+  updateRunState,
+  writeStageInFlight
 } from './4coop-state.mjs'
-import { ensureWorktree, removeWorktree } from './4coop-worktree.mjs'
+import { detectBaseBranch, ensureInPlaceBranch, ensureWorktree, listBaseBranchCandidates, removeWorktree } from './4coop-worktree.mjs'
 import { ensureTagged, stripLeadingTag, withTag } from './4coop-tag-format.mjs'
 import { runClaudeStage } from './4coop-stage-claude.mjs'
 import { runCodexExec, runCodexResume } from './4coop-stage-codex.mjs'
 import { isProjectScaffoldComplete, refreshAgentsFromConfig, scaffoldProject } from './4coop-scaffolder.mjs'
 
 const READ_ONLY_STAGES = new Set(['planner', 'spec_checker', 'escalation', 'reviewer', 'gatekeeper', 'narrator'])
+
+const SUSPEND_REASON = {
+  user: 'user',
+  network: 'network_loss',
+  apiExhausted: 'api_exhausted'
+}
+
+class SuspendRequested extends Error {
+  constructor(reason = SUSPEND_REASON.user) {
+    super(`suspend requested: ${reason}`)
+    this.name = 'SuspendRequested'
+    this.reason = reason
+  }
+}
+
+const stageController = {
+  child: null,
+  suspendReason: null,
+  suspendRequested: false,
+  basePaths: null,
+  heartbeatTimer: null
+}
+
+function registerChild(child) {
+  stageController.child = child
+}
+
+function clearChild() {
+  stageController.child = null
+}
+
+function requestSuspend(reason) {
+  stageController.suspendRequested = true
+  stageController.suspendReason = reason ?? SUSPEND_REASON.user
+  const child = stageController.child
+  if (child && typeof child.kill === 'function') {
+    try { child.kill('SIGTERM') } catch {}
+  }
+}
+
+function startHeartbeat(basePaths, paths) {
+  stopHeartbeat()
+  stageController.basePaths = basePaths
+  stageController.heartbeatTimer = setInterval(() => {
+    try {
+      touchLockHeartbeat(basePaths)
+      if (paths?.stageInFlightFile) touchStageInFlight(paths)
+    } catch {
+      // Heartbeat is best-effort.
+    }
+  }, 10 * 1000)
+  stageController.heartbeatTimer.unref?.()
+}
+
+function stopHeartbeat() {
+  if (stageController.heartbeatTimer) {
+    clearInterval(stageController.heartbeatTimer)
+    stageController.heartbeatTimer = null
+  }
+}
+
+async function saveActiveSessionAndNudge(basePaths, sessionData) {
+  saveActiveSession(basePaths, sessionData)
+  try {
+    await nudgeCockpit(basePaths)
+  } catch {
+    // Monitor may not be running; halt flow should not depend on the UI.
+  }
+}
+
+async function clearActiveSessionAndNudge(pathsLike) {
+  clearActiveSession(pathsLike)
+  try {
+    await nudgeCockpit(pathsLike)
+  } catch {}
+}
+
 const STAGE_SCHEMA_FILES = {
   planner: 'planner-result.json',
   builder: 'builder-result.json',
@@ -81,18 +178,9 @@ const STAGE_SCHEMA_FILES = {
   reviewer: 'reviewer-result.json',
   fixer: 'fixer-result.json',
   gatekeeper: 'gatekeeper-verdict.json',
-  narrator: 'narrator-result.json'
+  narrator: 'narrator-result.json',
+  pr_writer: 'pr-writer-result.json'
 }
-const SETUP_MANIFEST_FILES = [
-  'package.json',
-  'pyproject.toml',
-  'go.mod',
-  'Cargo.toml',
-  'Makefile',
-  'Gemfile',
-  'Rakefile',
-  'composer.json'
-]
 
 function parseArgs(argv) {
   const [command = 'start', ...rest] = argv
@@ -100,13 +188,16 @@ function parseArgs(argv) {
     command,
     feature: '',
     answer: '',
+    base: '',
     flags: []
   }
 
   for (let index = 0; index < rest.length; index += 1) {
     const current = rest[index]
-    if (current === '--feature' || current === '--answer') {
-      const target = current === '--feature' ? 'feature' : 'answer'
+    if (current === '--feature' || current === '--answer' || current === '--base') {
+      const target = current === '--feature'
+        ? 'feature'
+        : current === '--answer' ? 'answer' : 'base'
       const values = []
       for (let inner = index + 1; inner < rest.length; inner += 1) {
         if (rest[inner].startsWith('--')) {
@@ -126,6 +217,11 @@ function parseArgs(argv) {
 
   if (!parsed.feature && parsed.command === 'start') {
     parsed.feature = parsed.flags.join(' ').trim()
+    parsed.flags = []
+  }
+
+  if (parsed.command === 'set-base' && !parsed.base) {
+    parsed.base = parsed.flags.join(' ').trim()
     parsed.flags = []
   }
 
@@ -444,20 +540,7 @@ function fetchPullRequestConversation(state, worktreePath) {
   }
 }
 
-function collectSetupManifestEntries(projectRoot) {
-  return SETUP_MANIFEST_FILES
-    .map(fileName => path.join(projectRoot, fileName))
-    .filter(pathExists)
-    .map(filePath => {
-      const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/).slice(0, 100).join('\n')
-      return {
-        relative_path: relativeProjectPath(projectRoot, filePath),
-        snippet: lines
-      }
-    })
-}
-
-function buildSetupAssistantPrompt(config, manifestEntries) {
+function buildSetupAssistantPrompt(config, manifestEntries, fallback) {
   const manifestBlock = manifestEntries.length > 0
     ? manifestEntries.map(entry => {
       return [
@@ -467,23 +550,35 @@ function buildSetupAssistantPrompt(config, manifestEntries) {
         '```'
       ].join('\n')
     }).join('\n\n')
-    : 'No recognized manifest files were provided.'
+    : 'No recognized manifest files were found.'
+
+  const hintBlock = fallback ? [
+    '',
+    'Deterministic detector hint (you may override if the manifests suggest something better):',
+    `  detected_stack = ${fallback.detected_stack}`,
+    `  proposed_build = ${fallback.proposed_build || '(none)'}`,
+    `  proposed_test  = ${fallback.proposed_test || '(none)'}`,
+    `  proposed_lint  = ${fallback.proposed_lint || '(none)'}`,
+    ''
+  ].join('\n') : ''
 
   return [
     'You are the 4CO-OP narrator in setup-assistant mode.',
     `Return only JSON with tagged_message starting exactly with "${config.tags.meta}:".`,
-    'Inspect only the manifest snippets provided below.',
+    'Inspect the manifest and config snippets provided below.',
     'Pick sensible build, test, and lint commands for this project.',
-    'Prefer commands that are explicitly present in the manifests.',
+    'Prefer commands explicitly declared in the manifests (e.g. package.json scripts, Makefile targets, justfile recipes).',
+    'Prefer wrapper scripts when present (./gradlew, ./mvnw).',
+    'Pick the package manager suggested by any lockfile bullets listed below (bun.lockb → bun, pnpm-lock.yaml → pnpm, yarn.lock → yarn, package-lock.json → npm).',
     'If the project does not appear to have tests yet, proposed_test may be an empty string.',
     'Return keys: tagged_message, detected_stack, proposed_build, proposed_test, proposed_lint, confidence, summary.',
-    '',
+    hintBlock,
     manifestBlock
   ].join('\n')
 }
 
 async function runSetupAssistant(projectRoot, config) {
-  const manifestEntries = collectSetupManifestEntries(projectRoot)
+  const manifestEntries = collectManifestSnippets(projectRoot)
   const fallback = proposeProjectCommands(projectRoot)
 
   try {
@@ -491,7 +586,7 @@ async function runSetupAssistant(projectRoot, config) {
       cli: config.models.narrator.cli,
       stage: 'narrator',
       model: config.models.narrator.model,
-      prompt: buildSetupAssistantPrompt(config, manifestEntries),
+      prompt: buildSetupAssistantPrompt(config, manifestEntries, fallback),
       cwd: projectRoot,
       timeoutMs: 5 * 60 * 1000
     })
@@ -531,7 +626,13 @@ function parseConfigAnswer(answer, proposal) {
   if (/^cancel\b/i.test(trimmed)) {
     return { action: 'cancel' }
   }
-  if (/^(ok|yes|use these)\b/i.test(trimmed)) {
+  if (/^(skip|skip all|just start|just run|nothing)\b/i.test(trimmed)) {
+    return {
+      action: 'accept',
+      commands: { build: '', test: '', lint: '' }
+    }
+  }
+  if (/^(ok|okay|yes|use these|use proposed|accept)\b/i.test(trimmed)) {
     return {
       action: 'accept',
       commands: {
@@ -541,13 +642,33 @@ function parseConfigAnswer(answer, proposal) {
       }
     }
   }
-  if (/^(no tests|skip tests)\b/i.test(trimmed)) {
+  if (/^(no tests|skip tests|without tests)\b/i.test(trimmed)) {
     return {
       action: 'accept',
       commands: {
         build: proposal.proposed_build ?? '',
         test: '',
         lint: proposal.proposed_lint ?? ''
+      }
+    }
+  }
+  if (/^(no build|skip build|without build)\b/i.test(trimmed)) {
+    return {
+      action: 'accept',
+      commands: {
+        build: '',
+        test: proposal.proposed_test ?? '',
+        lint: proposal.proposed_lint ?? ''
+      }
+    }
+  }
+  if (/^(no lint|skip lint|without lint)\b/i.test(trimmed)) {
+    return {
+      action: 'accept',
+      commands: {
+        build: proposal.proposed_build ?? '',
+        test: proposal.proposed_test ?? '',
+        lint: ''
       }
     }
   }
@@ -648,6 +769,7 @@ function buildNarratorPrompt(config, mode, targetStage, payload) {
   const tag = targetStage === 'meta' ? config.tags.meta : config.tags[targetStage].replace('{tag_display}', config.models[targetStage].tag_display)
   if (mode === 'relay') {
     return [
+      STRICT_JSON_PREAMBLE,
       'You are the 4CO-OP narrator relay.',
       'Do not paraphrase any requirements or file contents.',
       'Return only JSON:',
@@ -659,6 +781,7 @@ function buildNarratorPrompt(config, mode, targetStage, payload) {
 
   if (mode === 'planner-summary') {
     return [
+      STRICT_JSON_PREAMBLE,
       'You are the 4CO-OP narrator.',
       `Return only JSON with tagged_message starting exactly with "${tag}:".`,
       'Also include summary_sentences as an array of at most 5 items.',
@@ -670,6 +793,7 @@ function buildNarratorPrompt(config, mode, targetStage, payload) {
   }
 
   return [
+    STRICT_JSON_PREAMBLE,
     'You are the 4CO-OP narrator.',
     `Return only JSON with tagged_message starting exactly with "${tag}:".`,
     'Keep the message short and plain.',
@@ -711,7 +835,9 @@ async function runTrackedStage({
   monitorState,
   monitorPort,
   timeoutMs = 20 * 60 * 1000,
-  sessionId = null
+  sessionId = null,
+  resumeSessionId = null,
+  basePaths = null
 }) {
   const stageConfig = config.models[stage]
   const startedAt = new Date().toISOString()
@@ -728,6 +854,83 @@ async function runTrackedStage({
   await syncMonitor(paths, state, monitorState, monitorPort)
   snapshot(logger, monitorState)
 
+  const callIndex = (monitorState.rows[stage]?.calls ?? 0) + 1
+  const liveSink = createLiveEventSink({
+    runDir: paths.runDir,
+    stage,
+    callIndex,
+    broadcast: monitorPort
+      ? (eventName, payload) => { postStageEvent(monitorPort, payload).catch(() => {}) }
+      : null
+  })
+
+  const suspendConfig = config.suspend ?? {}
+  const watchdog = suspendConfig.auto_suspend_on_network_loss !== false
+    ? createNetworkWatchdog({
+        endpoints: suspendConfig.network_probe_endpoints,
+        silenceTimeoutMs: suspendConfig.stream_silence_timeout_ms,
+        maxConsecutiveFailures: suspendConfig.max_consecutive_probe_failures,
+        onNetworkLoss: () => {
+          logger.write('network_loss_detected', { stage })
+          requestSuspend(SUSPEND_REASON.network)
+        }
+      })
+    : null
+
+  const onEvent = (event, rawLine) => {
+    watchdog?.recordActivity()
+    if (event?.type === 'system' && event?.subtype === 'api_retry') {
+      const attempt = Number(event.attempt ?? 0)
+      const maxRetries = Number(event.max_retries ?? 0)
+      if (maxRetries > 0 && attempt >= maxRetries) {
+        logger.write('api_retry_exhausted', {
+          stage,
+          error: event.error ?? null,
+          error_status: event.error_status ?? null
+        })
+        requestSuspend(SUSPEND_REASON.apiExhausted)
+      }
+    }
+    liveSink.onEvent(event, rawLine)
+  }
+
+  let effectiveResume = resumeSessionId
+  if (!effectiveResume && state?.resume_hint?.stage === stage && state.resume_hint.session_id) {
+    effectiveResume = state.resume_hint.session_id
+    state.resume_hint = null
+    saveRunState(paths, state)
+    logger.write('stage_resume', { stage, session_id: effectiveResume })
+  }
+  const preAssignedClaudeId = stageConfig.cli === 'claude' && !effectiveResume ? randomUUID() : null
+  const initialSessionId = effectiveResume ?? preAssignedClaudeId ?? sessionId ?? null
+  const effectiveBasePaths = basePaths ?? (paths?.projectRoot ? getRuntimePaths(paths.projectRoot) : null)
+
+  writeStageInFlight(paths, {
+    stage,
+    callIndex,
+    tool: stageConfig.cli,
+    sessionId: initialSessionId,
+    promptPath: null
+  })
+  if (effectiveBasePaths) startHeartbeat(effectiveBasePaths, paths)
+  watchdog?.start()
+
+  const onSessionStarted = id => {
+    if (!id) return
+    try {
+      recordSessionId(paths, { stage, callIndex, sessionId: id, tool: stageConfig.cli })
+      touchStageInFlight(paths, { session_id: id })
+    } catch {
+      // Never crash a stage because bookkeeping failed.
+    }
+  }
+  const onSpawn = child => {
+    registerChild(child)
+    if (stageController.suspendRequested) {
+      try { child.kill('SIGTERM') } catch {}
+    }
+  }
+
   const started = Date.now()
   try {
     let result
@@ -738,18 +941,26 @@ async function runTrackedStage({
         model: stageConfig.model,
         prompt,
         cwd,
-        timeoutMs
+        timeoutMs,
+        onEvent,
+        sessionId: preAssignedClaudeId,
+        resumeSessionId: effectiveResume,
+        onSessionStarted,
+        onSpawn
       })
-    } else if (sessionId) {
+    } else if (effectiveResume || sessionId) {
       result = await runCodexResume({
         stage,
-        sessionId,
+        sessionId: effectiveResume ?? sessionId,
         model: stageConfig.model,
         prompt,
         cwd,
         outputFile,
         rawOutputPath,
-        timeoutMs
+        timeoutMs,
+        onEvent,
+        onSessionStarted,
+        onSpawn
       })
     } else {
       result = await runCodexExec({
@@ -761,7 +972,10 @@ async function runTrackedStage({
         outputFile,
         rawOutputPath,
         sandboxMode: READ_ONLY_STAGES.has(stage) ? 'read-only' : 'workspace-write',
-        timeoutMs
+        timeoutMs,
+        onEvent,
+        onSessionStarted,
+        onSpawn
       })
     }
 
@@ -774,7 +988,11 @@ async function runTrackedStage({
       input_tokens: result.usage.input_tokens,
       output_tokens: result.usage.output_tokens,
       duration_ms: durationMs,
-      exact_tokens: result.usage.exact
+      exact_tokens: result.usage.exact,
+      structured: result.structured ?? null,
+      model: stageConfig.model,
+      cli: stageConfig.cli,
+      event_tokens: liveSink.eventCounts
     })
     logger.write('stage_call', {
       stage,
@@ -783,25 +1001,174 @@ async function runTrackedStage({
       input_tokens: result.usage.input_tokens,
       output_tokens: result.usage.output_tokens,
       exit_code: result.exitCode,
-      exact_tokens: result.usage.exact
+      exact_tokens: result.usage.exact,
+      event_tokens: liveSink.eventCounts,
+      output_file: outputFile,
+      raw_output_path: rawOutputPath,
+      model: stageConfig.model,
+      cli: stageConfig.cli
     })
     await syncMonitor(paths, state, monitorState, monitorPort)
     snapshot(logger, monitorState)
+    clearStageInFlight(paths)
+    clearChild()
+    stopHeartbeat()
+    watchdog?.stop()
     return result
   } catch (error) {
     interruptStageCall(monitorState, stage, {
       started_at: startedAt,
       ended_at: new Date().toISOString(),
-      input: prompt
+      input: prompt,
+      event_tokens: liveSink.eventCounts,
+      model: stageConfig.model,
+      cli: stageConfig.cli,
+      schema_failure: error?.name === 'StageSchemaError' ? {
+        message: error.message,
+        stage: error.stage,
+        output_text_preview: String(error.outputText ?? '').slice(0, 2000),
+        stderr_preview: String(error.stderr ?? '').slice(0, 1000)
+      } : null
     })
+    clearChild()
+    stopHeartbeat()
+    watchdog?.stop()
+
+    if (stageController.suspendRequested) {
+      const reason = stageController.suspendReason ?? SUSPEND_REASON.user
+      logger.write('stage_suspended', { stage, reason })
+      await syncMonitor(paths, state, monitorState, monitorPort)
+      snapshot(logger, monitorState)
+      throw new SuspendRequested(reason)
+    }
+
     logger.write('interruption', {
       stage,
-      reason_code: 'error'
+      reason_code: error?.name === 'StageSchemaError' ? 'schema_error' : 'error',
+      message: error?.message ?? null,
+      output_file: outputFile,
+      raw_output_path: rawOutputPath
     })
     await syncMonitor(paths, state, monitorState, monitorPort)
     snapshot(logger, monitorState)
     throw error
   }
+}
+
+const STRICT_JSON_PREAMBLE = [
+  'CRITICAL OUTPUT FORMAT REQUIREMENT:',
+  '- Respond with ONLY a single JSON object matching the provided schema.',
+  '- No markdown code fences (no ```json ... ```).',
+  '- No prose before or after the JSON.',
+  '- No commentary, no explanations outside the JSON fields.',
+  '- The response must parse as valid JSON on the first attempt.',
+  ''
+].join('\n')
+
+function writeSchemaFailureArtifact(runDir, stage, attempt, error) {
+  try {
+    const base = `${stage}-failure-attempt-${String(attempt).padStart(2, '0')}`
+    const rawPath = path.join(runDir, `${base}-raw.txt`)
+    fs.writeFileSync(rawPath, String(error?.outputText ?? ''), 'utf8')
+    if (error?.stderr) {
+      const stderrPath = path.join(runDir, `${base}-stderr.txt`)
+      fs.writeFileSync(stderrPath, String(error.stderr), 'utf8')
+    }
+    return rawPath
+  } catch {
+    return null
+  }
+}
+
+async function runSpecCheckerWithRecovery({
+  config,
+  basePrompt,
+  cwd,
+  paths,
+  state,
+  logger,
+  monitorState,
+  monitorPort
+}) {
+  const stage = 'spec_checker'
+  const originalStageConfig = { ...config.models[stage] }
+  const escalationModel = originalStageConfig.escalation_model ?? null
+  const attempts = [
+    { label: 'initial', prompt: basePrompt, overrideModel: null },
+    { label: 'strict_retry', prompt: `${STRICT_JSON_PREAMBLE}${basePrompt}`, overrideModel: null }
+  ]
+  if (escalationModel && escalationModel !== originalStageConfig.model) {
+    attempts.push({
+      label: 'escalation',
+      prompt: `${STRICT_JSON_PREAMBLE}${basePrompt}`,
+      overrideModel: escalationModel
+    })
+  }
+
+  const recoveryTrail = []
+  let lastError = null
+
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attempt = attempts[index]
+    if (attempt.overrideModel) {
+      config.models[stage] = { ...originalStageConfig, model: attempt.overrideModel }
+      logger.write('spec_checker_model_escalation', {
+        attempt: attempt.label,
+        from_model: originalStageConfig.model,
+        to_model: attempt.overrideModel
+      })
+    }
+    try {
+      const result = await runTrackedStage({
+        stage,
+        config,
+        prompt: attempt.prompt,
+        cwd,
+        paths,
+        state,
+        logger,
+        monitorState,
+        monitorPort,
+        timeoutMs: 20 * 60 * 1000
+      })
+      if (recoveryTrail.length > 0) {
+        logger.write('spec_checker_schema_recovered', {
+          attempt: attempt.label,
+          recovered_after: recoveryTrail
+        })
+      }
+      config.models[stage] = originalStageConfig
+      return result
+    } catch (error) {
+      config.models[stage] = originalStageConfig
+      if (!isStageSchemaError(error, stage)) {
+        throw error
+      }
+      lastError = error
+      const rawPath = writeSchemaFailureArtifact(paths.runDir, stage, index + 1, error)
+      recoveryTrail.push({
+        attempt: attempt.label,
+        raw_path: rawPath ? path.basename(rawPath) : null,
+        message: error.message
+      })
+      logger.write('spec_checker_schema_failure', {
+        attempt: attempt.label,
+        model: attempt.overrideModel ?? originalStageConfig.model,
+        raw_path: rawPath ? path.basename(rawPath) : null,
+        message: error.message
+      })
+    }
+  }
+
+  const failure = new Error(
+    `spec checker schema parse failed after ${recoveryTrail.length} attempts — see ${recoveryTrail.map(entry => entry.raw_path).filter(Boolean).join(', ')}`
+  )
+  failure.name = 'StageSchemaError'
+  failure.stage = stage
+  failure.recoveryTrail = recoveryTrail
+  failure.outputText = lastError?.outputText ?? ''
+  failure.stderr = lastError?.stderr ?? ''
+  throw failure
 }
 
 async function runNarrator({
@@ -816,39 +1183,125 @@ async function runNarrator({
   monitorPort
 }) {
   const prompt = buildNarratorPrompt(config, mode, targetStage, payload)
+  const attemptStage = async stagePrompt => runTrackedStage({
+    stage: 'narrator',
+    config,
+    prompt: stagePrompt,
+    cwd: state?.worktree?.path ?? paths.projectRoot,
+    paths,
+    state,
+    logger,
+    monitorState,
+    monitorPort,
+    timeoutMs: 5 * 60 * 1000
+  })
+
+  let result
   try {
-    const result = await runTrackedStage({
-      stage: 'narrator',
-      config,
-      prompt,
-      cwd: state?.worktree?.path ?? paths.projectRoot,
-      paths,
-      state,
-      logger,
-      monitorState,
-      monitorPort,
-      timeoutMs: 5 * 60 * 1000
-    })
-    if (mode === 'relay') {
-      return result.structured.relay_prompt || payload.preferred_prompt
+    result = await attemptStage(prompt)
+  } catch (error) {
+    if (!isStageSchemaError(error, 'narrator')) {
+      return narratorFallback(config, mode, targetStage, payload)
     }
-    if (mode === 'planner-summary') {
-      return finalizePlannerSummaryMessage(config, result.structured, payload.plan_absolute_path, payload.plan_path)
+    try {
+      result = await attemptStage(`${STRICT_JSON_PREAMBLE}\n\n${prompt}`)
+    } catch {
+      return narratorFallback(config, mode, targetStage, payload)
     }
-    return ensureTagged(config, targetStage, result.structured.tagged_message)
-  } catch {
-    if (mode === 'relay') {
-      return payload.preferred_prompt
-    }
-    if (mode === 'planner-summary') {
-      return summarizePlanFallback(
-        config,
-        payload.plan_markdown,
-        payload.plan_absolute_path ?? payload.plan_path
-      )
-    }
-    return fallbackStatusMessage(config, targetStage, payload)
   }
+
+  if (mode === 'relay') {
+    return result.structured.relay_prompt || payload.preferred_prompt
+  }
+  if (mode === 'planner-summary') {
+    return finalizePlannerSummaryMessage(config, result.structured, payload.plan_absolute_path, payload.plan_path)
+  }
+  return ensureTagged(config, targetStage, result.structured.tagged_message)
+}
+
+async function runPrWriterAndUpdatePr({ config, paths, state, logger, monitorState, monitorPort, projectRoot }) {
+  if (!state.pr?.number || !state.github?.repo) {
+    throw new Error('pr_writer skipped: no PR context')
+  }
+
+  const diffPath = paths.reviewerInputFile
+  const reviewPath = paths.reviewFile
+  const specSummaryPath = path.join(paths.runDir, 'spec-summary.md')
+  if (state.spec_check?.results) {
+    const specLines = [
+      '# Spec checker summary',
+      '',
+      ...state.spec_check.results.map(item => `- ${item.status} · ${item.id}${item.evidence_file ? ` — ${item.evidence_file}:${item.evidence_line}` : ''}`)
+    ]
+    fs.writeFileSync(specSummaryPath, `${specLines.join('\n')}\n`, 'utf8')
+  }
+
+  const prompt = buildPrWriterPrompt(config, {
+    planPath: paths.planFile,
+    diffPath,
+    reviewPath,
+    specSummaryPath: pathExists(specSummaryPath) ? specSummaryPath : null,
+    builder: state.builder ?? {},
+    featureRequest: state.feature_request
+  })
+
+  const cwd = state.worktree?.path ?? projectRoot
+  const result = await runTrackedStage({
+    stage: 'pr_writer',
+    config,
+    prompt,
+    cwd,
+    paths,
+    state,
+    logger,
+    monitorState,
+    monitorPort,
+    timeoutMs: 10 * 60 * 1000
+  })
+
+  const title = String(result.structured.title ?? '').trim()
+  const body = String(result.structured.body_markdown ?? '').trim()
+  if (!title || !body) {
+    throw new Error('pr_writer returned empty title or body')
+  }
+
+  const bodyPath = path.join(paths.runDir, 'pr-body-final.md')
+  fs.writeFileSync(bodyPath, `${body}\n`, 'utf8')
+
+  runCommand('gh', [
+    'pr',
+    'edit',
+    String(state.pr.number),
+    '--repo',
+    state.github.repo,
+    '--title',
+    title,
+    '--body-file',
+    bodyPath
+  ], { cwd })
+
+  state.pr = {
+    ...state.pr,
+    title,
+    body_path: bodyPath
+  }
+  saveRunState(paths, state)
+
+  return ensureTagged(config, 'pr_writer', result.structured.tagged_message)
+}
+
+function narratorFallback(config, mode, targetStage, payload) {
+  if (mode === 'relay') {
+    return payload.preferred_prompt
+  }
+  if (mode === 'planner-summary') {
+    return summarizePlanFallback(
+      config,
+      payload.plan_markdown,
+      payload.plan_absolute_path ?? payload.plan_path
+    )
+  }
+  return fallbackStatusMessage(config, targetStage, payload)
 }
 
 function buildPlannerPrompt(config, featureRequest) {
@@ -875,7 +1328,7 @@ function buildSpecPrompt(config, planPath) {
     'Return only JSON with keys results, summary, tagged_message.',
     `tagged_message must start exactly with "${tag}:"`,
     'Each result item must have id, status, evidence_file, evidence_line, quote.',
-    `Plan file: ${planPath}`
+    `Plan file (absolute path, readable from any cwd): ${planPath}`
   ].join('\n')
 }
 
@@ -886,8 +1339,8 @@ function buildEscalationPrompt(config, planPath, unresolvedJsonPath) {
     'Resolve only the UNCLEAR checklist items to PASS or FAIL.',
     'Return only JSON with keys resolved and tagged_message.',
     `tagged_message must start exactly with "${tag}:"`,
-    `Plan file: ${planPath}`,
-    `UNCLEAR input file: ${unresolvedJsonPath}`
+    `Plan file (absolute path): ${planPath}`,
+    `UNCLEAR input file (absolute path): ${unresolvedJsonPath}`
   ].join('\n')
 }
 
@@ -898,8 +1351,8 @@ function buildReviewerPrompt(config, planPath, reviewInputPath) {
     'Read the diff and the approved plan.',
     'Return only JSON with keys issues, tagged_message, body_markdown.',
     `tagged_message must start exactly with "${tag}:"`,
-    `Plan file: ${planPath}`,
-    `PR diff file: ${reviewInputPath}`
+    `Plan file (absolute path): ${planPath}`,
+    `PR diff file (absolute path): ${reviewInputPath}`
   ].join('\n')
 }
 
@@ -908,10 +1361,38 @@ function buildGatekeeperPrompt(config, planPath, reviewInputPath, issuesPath) {
     'You are the 4CO-OP Gatekeeper.',
     'Use the approved plan, the current PR diff, and the latest issue list.',
     'Return only the schema-compliant verdict JSON.',
-    `Plan file: ${planPath}`,
-    `PR diff file: ${reviewInputPath}`,
-    `Issues file: ${issuesPath}`
+    `Plan file (absolute path): ${planPath}`,
+    `PR diff file (absolute path): ${reviewInputPath}`,
+    `Issues file (absolute path): ${issuesPath}`
   ].join('\n')
+}
+
+function buildPrWriterPrompt(config, { planPath, diffPath, reviewPath, specSummaryPath, builder, featureRequest }) {
+  const prWriterConfig = config.models.pr_writer ?? { tag_display: 'Sonnet 4.6' }
+  const tagTemplate = config.tags.pr_writer ?? '[✍️ PR Writer | {tag_display}]'
+  const tag = tagTemplate.replace('{tag_display}', prWriterConfig.tag_display)
+  const builderSummary = [
+    `commit ${String(builder?.commit_sha ?? '').slice(0, 12)}`,
+    `build: ${builder?.build ?? '(not run)'}`,
+    `tests: ${builder?.tests ?? '(not run)'}`,
+    `lint: ${builder?.lint ?? '(not run)'}`
+  ].join(' · ')
+
+  return [
+    'You are the 4CO-OP PR Writer.',
+    'Read the approved plan, the final PR diff, the reviewer body, and the spec checker summary.',
+    'Write a merge-ready PR title and body.',
+    'Title: imperative mood, under 70 characters, no trailing period.',
+    'Body: include Summary, Acceptance checklist (check items that passed the spec checker), Test plan, and optional Notes.',
+    'Return only JSON with keys title, body_markdown, tagged_message.',
+    `tagged_message must start exactly with "${tag}:"`,
+    `Feature request: ${featureRequest}`,
+    `Plan file (absolute path): ${planPath}`,
+    `PR diff file (absolute path): ${diffPath}`,
+    `Reviewer body file (absolute path): ${reviewPath}`,
+    specSummaryPath ? `Spec summary file (absolute path): ${specSummaryPath}` : '',
+    `Builder summary: ${builderSummary}`
+  ].filter(Boolean).join('\n')
 }
 
 function buildFixerIssuesMarkdown(title, issues) {
@@ -1022,6 +1503,39 @@ function finalizeRun(paths, state, logger, outcome) {
   releaseLock(paths)
 }
 
+function suspendRun({ basePaths, paths, state, logger, feature, monitorPort, reason }) {
+  const inFlight = readStageInFlight(paths)
+  state.status = 'suspended'
+  state.suspend_reason = reason
+  state.suspended_at = new Date().toISOString()
+  if (inFlight?.session_id) {
+    state.resume_hint = {
+      stage: inFlight.stage,
+      session_id: inFlight.session_id,
+      call_index: inFlight.call_index,
+      tool: inFlight.tool
+    }
+  }
+  saveRunState(paths, state)
+  try {
+    markLockSuspended(basePaths, reason)
+  } catch {
+    // If the lock is gone we still record the suspended state.
+  }
+  try {
+    saveActiveSession(basePaths, {
+      status: 'suspended',
+      run_id: state.run_id,
+      feature: feature ?? state.feature_request ?? '',
+      suspend_reason: reason,
+      log_file: logger?.filePath ?? state.log_file ?? null,
+      monitor_port: monitorPort ?? state.monitor_port ?? null,
+      suspended_at: state.suspended_at
+    })
+  } catch {}
+  logger?.write?.('run_suspended', { reason })
+}
+
 async function maybeDrainQueue(context) {
   const { paths, config } = context
   const { next } = shiftQueue(paths)
@@ -1061,9 +1575,10 @@ async function handleStart(projectRoot, feature, options = {}) {
   }
 
   if (!isProjectScaffoldComplete(projectRoot)) {
-    saveActiveSession(basePaths, {
+    await saveActiveSessionAndNudge(basePaths, {
       status: 'awaiting_scaffold',
       feature,
+      base: options.base ?? '',
       created_at: new Date().toISOString()
     })
     return {
@@ -1076,9 +1591,10 @@ async function handleStart(projectRoot, feature, options = {}) {
   const projectCommands = loadProjectCommands(basePaths.projectConfigPath)
   if (!projectCommandsReady(projectCommands)) {
     const proposal = await runSetupAssistant(projectRoot, config)
-    saveActiveSession(basePaths, {
+    await saveActiveSessionAndNudge(basePaths, {
       status: 'awaiting_config_confirm',
       feature,
+      base: options.base ?? '',
       proposal,
       created_at: new Date().toISOString()
     })
@@ -1089,7 +1605,7 @@ async function handleStart(projectRoot, feature, options = {}) {
   }
 
   if (!feature) {
-    saveActiveSession(basePaths, {
+    await saveActiveSessionAndNudge(basePaths, {
       status: 'awaiting_prompt',
       created_at: new Date().toISOString()
     })
@@ -1138,13 +1654,15 @@ async function handleStart(projectRoot, feature, options = {}) {
     logFile: logger.filePath
   })
   state.github = githubContext
+  const resolvedBasePreference = (options.base || config.workflow?.default_base_branch || '').trim()
+  state.base_branch_preference = resolvedBasePreference || null
   saveRunState(paths, state)
   acquireLock(basePaths, {
     run_id: runId,
     feature,
     started_at: new Date().toISOString()
   })
-  saveActiveSession(basePaths, {
+  await saveActiveSessionAndNudge(basePaths, {
     status: 'planning',
     run_id: runId,
     feature,
@@ -1167,7 +1685,8 @@ async function handleStart(projectRoot, feature, options = {}) {
         state,
         logger,
         monitorState,
-        monitorPort: monitor.port
+        monitorPort: monitor.port,
+        basePaths
       })
     } catch (error) {
       if (!isStageSchemaError(error, 'planner')) {
@@ -1184,7 +1703,8 @@ async function handleStart(projectRoot, feature, options = {}) {
         state,
         logger,
         monitorState,
-        monitorPort: monitor.port
+        monitorPort: monitor.port,
+        basePaths
       })
     }
 
@@ -1216,7 +1736,7 @@ async function handleStart(projectRoot, feature, options = {}) {
     messages.push(plannerMessage)
     messages.push(approvalPrompt(config))
 
-    saveActiveSession(basePaths, {
+    await saveActiveSessionAndNudge(basePaths, {
       status: 'awaiting_approval',
       run_id: runId,
       feature,
@@ -1231,8 +1751,28 @@ async function handleStart(projectRoot, feature, options = {}) {
       run_id: runId
     }
   } catch (error) {
+    if (error instanceof SuspendRequested) {
+      suspendRun({
+        basePaths,
+        paths,
+        state,
+        logger,
+        feature,
+        monitorPort: monitor.port,
+        reason: error.reason
+      })
+      try { await nudgeCockpit(basePaths) } catch {}
+      return {
+        status: 'suspended',
+        messages: [
+          ...messages,
+          withTag(config, 'meta', `Run suspended (${error.reason}). Use /4co-op resume to continue.`)
+        ],
+        run_id: runId
+      }
+    }
     finalizeRun(paths, state, logger, 'halted')
-    clearActiveSession(basePaths)
+    await clearActiveSessionAndNudge(basePaths)
     return {
       status: 'halted',
       messages: [
@@ -1250,7 +1790,7 @@ async function continueApprovedRun(projectRoot, activeSession) {
   ensureRuntimeDirs(paths)
   const state = readJsonIfExists(paths.stateFile)
   if (!state) {
-    clearActiveSession(basePaths)
+    await clearActiveSessionAndNudge(basePaths)
     return {
       status: 'halted',
       messages: [halted(config, 'run state not found')]
@@ -1265,8 +1805,36 @@ async function continueApprovedRun(projectRoot, activeSession) {
   const monitorState = state.metrics ?? createMonitorState(config)
   const monitor = await ensureMonitor(paths, config, serializeMonitorState(monitorState))
 
+  await saveActiveSessionAndNudge(basePaths, {
+    status: 'running',
+    run_id: activeSession.run_id,
+    feature: activeSession.feature ?? state.feature_request ?? '',
+    log_file: logger.filePath,
+    monitor_port: monitor.port,
+    created_at: activeSession.created_at ?? new Date().toISOString()
+  })
+
   try {
-    state.worktree = ensureWorktree(projectRoot, state.feature_request)
+    try {
+      const mode = config.workspace?.mode ?? 'in_place'
+      state.worktree = mode === 'worktree'
+        ? ensureWorktree(projectRoot, state.feature_request, state.base_branch_preference ?? null)
+        : ensureInPlaceBranch(projectRoot, state.feature_request, state.base_branch_preference ?? null)
+    } catch (worktreeError) {
+      if (state.base_branch_preference) {
+        const { branches } = listBaseBranchCandidates(projectRoot)
+        await clearActiveSessionAndNudge(basePaths)
+        finalizeRun(paths, state, logger, 'halted')
+        return {
+          status: 'halted',
+          messages: [
+            baseBranchInvalid(config, state.base_branch_preference, branches),
+            halted(config, worktreeError.message)
+          ]
+        }
+      }
+      throw worktreeError
+    }
     ensureGitHubContextForState(projectRoot, state)
     saveRunState(paths, state)
 
@@ -1352,18 +1920,16 @@ async function continueApprovedRun(projectRoot, activeSession) {
       targetStage: 'spec_checker',
       planFile: paths.planFile,
       projectRoot
-    })}\n\n${buildSpecPrompt(config, state.plan.path)}`
-    const specResult = await runTrackedStage({
-      stage: 'spec_checker',
+    })}\n\n${buildSpecPrompt(config, paths.planFile)}`
+    const specResult = await runSpecCheckerWithRecovery({
       config,
-      prompt: specPrompt,
+      basePrompt: specPrompt,
       cwd: state.worktree.path,
       paths,
       state,
       logger,
       monitorState,
-      monitorPort: monitor.port,
-      timeoutMs: 20 * 60 * 1000
+      monitorPort: monitor.port
     })
     state.spec_check = {
       results: specResult.structured.results,
@@ -1396,7 +1962,7 @@ async function continueApprovedRun(projectRoot, activeSession) {
         targetStage: 'escalation',
         planFile: paths.planFile,
         projectRoot
-      })}\n\n${buildEscalationPrompt(config, state.plan.path, relativeProjectPath(projectRoot, unresolvedPath))}`
+      })}\n\n${buildEscalationPrompt(config, paths.planFile, unresolvedPath)}`
       const escalationResult = await runTrackedStage({
         stage: 'escalation',
         config,
@@ -1428,7 +1994,7 @@ async function continueApprovedRun(projectRoot, activeSession) {
 
     if (state.spec_check.results.some(item => item.status === 'FAIL')) {
       finalizeRun(paths, state, logger, 'halted')
-      clearActiveSession(basePaths)
+      await clearActiveSessionAndNudge(basePaths)
       return {
         status: 'halted',
         messages: [
@@ -1450,7 +2016,7 @@ async function continueApprovedRun(projectRoot, activeSession) {
       planFile: paths.planFile,
       reviewFile: reviewInputPath,
       projectRoot
-    })}\n\n${buildReviewerPrompt(config, state.plan.path, relativeProjectPath(projectRoot, reviewInputPath))}`
+    })}\n\n${buildReviewerPrompt(config, paths.planFile, reviewInputPath)}`
     const reviewerResult = await runTrackedStage({
       stage: 'reviewer',
       config,
@@ -1558,7 +2124,7 @@ async function continueApprovedRun(projectRoot, activeSession) {
     let gateIterations = 0
     do {
       gateIterations += 1
-      const gatekeeperPrompt = buildGatekeeperPrompt(config, state.plan.path, relativeProjectPath(projectRoot, paths.reviewerInputFile), relativeProjectPath(projectRoot, issueFilePath))
+      const gatekeeperPrompt = buildGatekeeperPrompt(config, paths.planFile, paths.reviewerInputFile, issueFilePath)
       const gatekeeperResult = await runTrackedStage({
         stage: 'gatekeeper',
         config,
@@ -1645,11 +2211,27 @@ async function continueApprovedRun(projectRoot, activeSession) {
         last_comment_check_at: new Date().toISOString()
       }
       saveRunState(paths, state)
+
+      try {
+        const prWriterMessage = await runPrWriterAndUpdatePr({
+          config,
+          paths,
+          state,
+          logger,
+          monitorState,
+          monitorPort: monitor.port,
+          projectRoot
+        })
+        if (prWriterMessage) messages.push(prWriterMessage)
+      } catch (error) {
+        logger.write('pr_writer_skipped', { reason: error.message })
+      }
+
       messages.push(mergeReadyHint(config))
     }
 
     finalizeRun(paths, state, logger, verdict?.verdict === 'APPROVE' ? 'approved' : 'handed_off')
-    clearActiveSession(basePaths)
+    await clearActiveSessionAndNudge(basePaths)
     logger.write('window_closed', {
       port: monitor.port
     })
@@ -1672,8 +2254,24 @@ async function continueApprovedRun(projectRoot, activeSession) {
       messages
     }
   } catch (error) {
+    if (error instanceof SuspendRequested) {
+      suspendRun({
+        basePaths,
+        paths,
+        state,
+        logger,
+        feature: activeSession?.feature ?? state.feature_request ?? '',
+        monitorPort: monitor.port,
+        reason: error.reason
+      })
+      try { await nudgeCockpit(basePaths) } catch {}
+      return {
+        status: 'suspended',
+        messages: [withTag(config, 'meta', `Run suspended (${error.reason}). Use /4co-op resume to continue.`)]
+      }
+    }
     finalizeRun(paths, state, logger, 'halted')
-    clearActiveSession(basePaths)
+    await clearActiveSessionAndNudge(basePaths)
     logger.write('window_closed', {
       port: monitor.port
     })
@@ -1696,7 +2294,7 @@ async function handleReject(projectRoot, activeSession) {
   }
 
   if (activeSession.status === 'awaiting_scaffold' || activeSession.status === 'awaiting_config_confirm') {
-    clearActiveSession(basePaths)
+    await clearActiveSessionAndNudge(basePaths)
     return {
       status: 'rejected',
       messages: [nothingChanged(config)]
@@ -1716,14 +2314,14 @@ async function handleReject(projectRoot, activeSession) {
     } else {
       releaseLock(basePaths)
     }
-    clearActiveSession(basePaths)
+    await clearActiveSessionAndNudge(basePaths)
     return {
       status: 'rejected',
       messages: [halted(config, 'plan rejected by user')]
     }
   }
 
-  clearActiveSession(basePaths)
+  await clearActiveSessionAndNudge(basePaths)
   return {
     status: 'rejected',
     messages: [nothingChanged(config)]
@@ -1733,7 +2331,7 @@ async function handleReject(projectRoot, activeSession) {
 async function handleProvideFeature(projectRoot, feature) {
   const activeSession = loadActiveSession(getRuntimePaths(projectRoot))
   const nextFeature = feature || activeSession?.feature || ''
-  return await handleStart(projectRoot, nextFeature)
+  return await handleStart(projectRoot, nextFeature, { base: activeSession?.base ?? '' })
 }
 
 async function handleConfigConfirm(projectRoot, answer) {
@@ -1749,7 +2347,7 @@ async function handleConfigConfirm(projectRoot, answer) {
 
   const parsed = parseConfigAnswer(answer, active.proposal)
   if (parsed.action === 'cancel') {
-    clearActiveSession(paths)
+    await clearActiveSessionAndNudge(paths)
     return {
       status: 'rejected',
       messages: [nothingChanged(config)]
@@ -1764,21 +2362,15 @@ async function handleConfigConfirm(projectRoot, answer) {
 
   const commandErrors = validateProjectCommands(parsed.commands)
   if (commandErrors.length > 0) {
-    const missingKeys = commandErrors
-      .filter(item => item.endsWith('cannot be empty'))
-      .map(item => item.split(' ')[0])
     return {
       status: 'awaiting_config_confirm',
-      messages: [
-        configRequirements(config, missingKeys.length > 0 ? missingKeys : ['build', 'lint']),
-        configHelp(config)
-      ]
+      messages: [configHelp(config)]
     }
   }
 
   writeProjectCommands(paths, parsed.commands)
-  clearActiveSession(paths)
-  return await handleStart(projectRoot, active.feature ?? '')
+  await clearActiveSessionAndNudge(paths)
+  return await handleStart(projectRoot, active.feature ?? '', { base: active.base ?? '' })
 }
 
 async function handleCheckComment(projectRoot) {
@@ -1878,9 +2470,9 @@ async function handleCheckComment(projectRoot) {
     const manualReviewFilePath = path.join(paths.runDir, `manual-comments-review-${timestamp}.md`)
     const reviewerPrompt = buildManualCommentReviewerPrompt(
       config,
-      state.plan.path,
-      relativeProjectPath(projectRoot, reviewInputPath),
-      relativeProjectPath(projectRoot, commentFilePath)
+      paths.planFile,
+      reviewInputPath,
+      commentFilePath
     )
     const reviewerResult = await runTrackedStage({
       stage: 'reviewer',
@@ -1969,7 +2561,8 @@ async function handleCheckComment(projectRoot) {
       monitorState,
       monitorPort: monitor.port,
       sessionId: state.builder.codex_session_id,
-      timeoutMs: 60 * 60 * 1000
+      timeoutMs: 60 * 60 * 1000,
+      basePaths
     })
     state.fixer.iterations += 1
     state.fixer.commits.push(...fixerResult.structured.commits)
@@ -2003,9 +2596,9 @@ async function handleCheckComment(projectRoot) {
       gateIterations += 1
       const gatekeeperPrompt = buildGatekeeperPrompt(
         config,
-        state.plan.path,
-        relativeProjectPath(projectRoot, paths.reviewerInputFile),
-        relativeProjectPath(projectRoot, issueFilePath)
+        paths.planFile,
+        paths.reviewerInputFile,
+        issueFilePath
       )
       const gatekeeperResult = await runTrackedStage({
         stage: 'gatekeeper',
@@ -2172,6 +2765,10 @@ function cleanRuns(projectRoot, flags) {
     if (!state.pr?.number || !state.github?.repo || !state.worktree?.path || !pathExists(state.worktree.path)) {
       continue
     }
+    if (state.worktree.mode === 'in_place' || state.worktree.path === projectRoot) {
+      // In-place runs don't create a sibling worktree — nothing to sweep.
+      continue
+    }
     try {
       const prState = runCommand('gh', [
         'pr',
@@ -2221,17 +2818,214 @@ function cleanRuns(projectRoot, flags) {
   }
 }
 
+function handleListBranches(projectRoot) {
+  const config = loadConfig(projectRoot)
+  const { branches, default: def } = listBaseBranchCandidates(projectRoot)
+  const configuredDefault = config.workflow?.default_base_branch?.trim() || def
+  return {
+    status: 'ok',
+    messages: [branchList(config, branches, configuredDefault)]
+  }
+}
+
+function handleSetBase(projectRoot, branch) {
+  const config = loadConfig(projectRoot)
+  const trimmed = (branch || '').trim()
+  if (!trimmed) {
+    return {
+      status: 'halted',
+      messages: [halted(config, 'set-base requires a branch name, e.g. /4co-op set-base develop')]
+    }
+  }
+  try {
+    detectBaseBranch(projectRoot, trimmed)
+  } catch (error) {
+    const { branches } = listBaseBranchCandidates(projectRoot)
+    return {
+      status: 'halted',
+      messages: [
+        baseBranchInvalid(config, trimmed, branches),
+        halted(config, error.message)
+      ]
+    }
+  }
+
+  const paths = getRuntimePaths(projectRoot)
+  ensureRuntimeDirs(paths)
+  const existing = readJsonIfExists(paths.projectConfigOverridePath) ?? {}
+  existing.workflow = { ...(existing.workflow ?? {}), default_base_branch: trimmed }
+  writeJson(paths.projectConfigOverridePath, existing)
+
+  return {
+    status: 'ok',
+    messages: [baseBranchSet(config, trimmed)]
+  }
+}
+
+async function handleOpenCockpit(projectRoot) {
+  const config = loadConfig(projectRoot)
+  const basePaths = getRuntimePaths(projectRoot)
+  ensureRuntimeDirs(basePaths)
+
+  if (!isProjectScaffoldComplete(projectRoot)) {
+    scaffoldProject(projectRoot)
+  }
+
+  // Build a minimal monitor state so the cockpit renders stage chrome immediately.
+  const monitorState = createMonitorState(config)
+  const monitor = await ensureMonitor(basePaths, config, serializeMonitorState(monitorState))
+
+  return {
+    status: 'ok',
+    messages: [
+      withTag(config, 'meta', `cockpit open at http://127.0.0.1:${monitor.port}/ — describe a feature in the Start form to kick off a run.`)
+    ]
+  }
+}
+
+function handleStatus(projectRoot) {
+  const config = loadConfig(projectRoot)
+  const basePaths = getRuntimePaths(projectRoot)
+  const active = loadActiveSession(basePaths)
+  const lock = readLock(basePaths)
+  if (!active) {
+    return {
+      status: 'idle',
+      messages: [withTag(config, 'meta', 'No active run.')]
+    }
+  }
+  const paths = active.run_id ? getRuntimePaths(projectRoot, active.run_id) : null
+  const state = paths ? readJsonIfExists(paths.stateFile) : null
+  const inFlight = paths ? readStageInFlight(paths) : null
+  const summary = [
+    `status: ${active.status ?? state?.status ?? 'unknown'}`,
+    active.run_id ? `run_id: ${active.run_id}` : null,
+    state?.suspend_reason ? `suspend_reason: ${state.suspend_reason}` : null,
+    inFlight ? `in_flight_stage: ${inFlight.stage} (session ${inFlight.session_id ?? 'n/a'})` : null,
+    lock?.pid ? `orchestrator_pid: ${lock.pid}` : null,
+    lock?.heartbeat_at ? `last_heartbeat: ${lock.heartbeat_at}` : null
+  ].filter(Boolean).join('\n')
+  return {
+    status: 'ok',
+    messages: [withTag(config, 'meta', summary)]
+  }
+}
+
+async function handlePause(projectRoot) {
+  const config = loadConfig(projectRoot)
+  const basePaths = getRuntimePaths(projectRoot)
+  const lock = readLock(basePaths)
+  if (!lock || !lock.pid || lock.suspended) {
+    return {
+      status: 'noop',
+      messages: [withTag(config, 'meta', lock?.suspended ? 'Run already suspended.' : 'No active run to pause.')]
+    }
+  }
+  try {
+    process.kill(lock.pid, 'SIGTERM')
+  } catch (error) {
+    return {
+      status: 'halted',
+      messages: [halted(config, `could not signal orchestrator pid ${lock.pid}: ${error.message}`)]
+    }
+  }
+  return {
+    status: 'pausing',
+    messages: [withTag(config, 'meta', `Suspend signal sent to pid ${lock.pid}. Use /4co-op status to confirm, /4co-op resume to continue.`)]
+  }
+}
+
+async function handleResume(projectRoot) {
+  const config = loadConfig(projectRoot)
+  const basePaths = getRuntimePaths(projectRoot)
+  const active = loadActiveSession(basePaths)
+  if (!active || active.status !== 'suspended' || !active.run_id) {
+    return {
+      status: 'halted',
+      messages: [halted(config, 'there is no suspended run to resume')]
+    }
+  }
+  const paths = getRuntimePaths(projectRoot, active.run_id)
+  const state = readJsonIfExists(paths.stateFile)
+  if (!state) {
+    await clearActiveSessionAndNudge(basePaths)
+    return {
+      status: 'halted',
+      messages: [halted(config, 'suspended run state missing; cannot resume')]
+    }
+  }
+  try { markLockResumed(basePaths) } catch {}
+  markStateResumed(paths, 'running')
+
+  const resumeMessage = withTag(
+    config,
+    'meta',
+    `Resuming run ${active.run_id}${state.resume_hint?.stage ? ` at ${state.resume_hint.stage}` : ''}.`
+  )
+
+  if (!state.plan?.path) {
+    const result = await handleStart(projectRoot, state.feature_request ?? active.feature ?? '', {
+      bypassQueue: true,
+      base: state.base_branch_preference ?? ''
+    })
+    return {
+      status: result.status,
+      messages: [resumeMessage, ...result.messages],
+      run_id: result.run_id
+    }
+  }
+
+  const result = await continueApprovedRun(projectRoot, {
+    ...active,
+    status: 'running'
+  })
+  return {
+    status: result.status,
+    messages: [resumeMessage, ...result.messages]
+  }
+}
+
+function installSuspendSignalHandlers() {
+  let lastSigintAt = 0
+  const onSignal = reason => () => {
+    const now = Date.now()
+    if (reason === SUSPEND_REASON.user && now - lastSigintAt < 2000) {
+      // Double Ctrl+C escape hatch — let Node exit hard.
+      process.exit(130)
+    }
+    lastSigintAt = now
+    requestSuspend(reason)
+  }
+  process.on('SIGINT', onSignal(SUSPEND_REASON.user))
+  process.on('SIGTERM', onSignal(SUSPEND_REASON.user))
+}
+
 async function main() {
   const projectRoot = findProjectRoot(process.cwd())
   const args = parseArgs(process.argv.slice(2))
   const basePaths = getRuntimePaths(projectRoot)
   ensureRuntimeDirs(basePaths)
 
+  const suspendableCommands = new Set(['start', 'continue-active', 'resume', 'check-comment'])
+  if (suspendableCommands.has(args.command)) {
+    installSuspendSignalHandlers()
+  }
+
   let result
   if (args.command === 'start') {
-    result = await handleStart(projectRoot, args.feature)
+    result = await handleStart(projectRoot, args.feature, { base: args.base })
+  } else if (args.command === 'pause') {
+    result = await handlePause(projectRoot)
+  } else if (args.command === 'resume') {
+    result = await handleResume(projectRoot)
+  } else if (args.command === 'status') {
+    result = handleStatus(projectRoot)
   } else if (args.command === 'check-comment') {
     result = await handleCheckComment(projectRoot)
+  } else if (args.command === 'list-branches') {
+    result = handleListBranches(projectRoot)
+  } else if (args.command === 'set-base') {
+    result = handleSetBase(projectRoot, args.base)
   } else if (args.command === 'continue-active') {
     const activeSession = loadActiveSession(basePaths)
     if (!activeSession) {
@@ -2241,8 +3035,8 @@ async function main() {
       }
     } else if (activeSession.status === 'awaiting_scaffold') {
       scaffoldProject(projectRoot)
-      clearActiveSession(basePaths)
-      result = await handleStart(projectRoot, activeSession.feature ?? '')
+      await clearActiveSessionAndNudge(basePaths)
+      result = await handleStart(projectRoot, activeSession.feature ?? '', { base: activeSession.base ?? '' })
       result.messages = [scaffolded(loadConfig(projectRoot)), ...result.messages]
     } else if (activeSession.status === 'awaiting_approval') {
       result = await continueApprovedRun(projectRoot, activeSession)
@@ -2260,6 +3054,8 @@ async function main() {
     result = await handleConfigConfirm(projectRoot, args.answer)
   } else if (args.command === 'clean') {
     result = cleanRuns(projectRoot, args.flags)
+  } else if (args.command === 'open') {
+    result = await handleOpenCockpit(projectRoot)
   } else {
     result = {
       status: 'halted',
@@ -2270,7 +3066,7 @@ async function main() {
   printResult(result.status, result.messages, result.run_id ? { run_id: result.run_id } : {})
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(error => {
     const projectRoot = findProjectRoot(process.cwd())
     const config = loadConfig(projectRoot)

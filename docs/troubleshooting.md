@@ -100,8 +100,8 @@ What to check:
 
 What to try:
 
-- keep `browser` as `auto`
-- try `browser: "system"` if app-style launch is blocked
+- keep `browser` as `system` to use the OS default browser
+- try `browser: "auto"` (or a specific name like `chrome`/`edge`/`brave`) if you prefer an app-style tracker window
 - check whether a browser opener exists on the machine
 
 Cross-platform launcher behavior:

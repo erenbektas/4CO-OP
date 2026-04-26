@@ -116,20 +116,62 @@ export function extractStructuredPayload(stage, envelope, outputText) {
   throw new Error(`Unable to parse ${stage} output into the expected schema`)
 }
 
+function createLineStream(onLine) {
+  let buffer = ''
+  return {
+    push(chunk) {
+      buffer += chunk.toString()
+      let newlineIndex = buffer.indexOf('\n')
+      while (newlineIndex !== -1) {
+        const line = buffer.slice(0, newlineIndex).replace(/\r$/, '')
+        buffer = buffer.slice(newlineIndex + 1)
+        if (line.trim()) {
+          onLine(line)
+        }
+        newlineIndex = buffer.indexOf('\n')
+      }
+    },
+    flush() {
+      if (buffer.trim()) {
+        onLine(buffer.replace(/\r$/, ''))
+        buffer = ''
+      }
+    }
+  }
+}
+
 export async function runClaudeStage({
   cli = 'claude',
   stage,
   model,
   prompt,
   cwd,
-  timeoutMs = 20 * 60 * 1000
+  timeoutMs = 20 * 60 * 1000,
+  permissionMode = 'bypassPermissions',
+  onEvent = null,
+  sessionId = null,
+  resumeSessionId = null,
+  onSessionStarted = null,
+  onSpawn = null
 }) {
   return await new Promise((resolve, reject) => {
-    const args = ['-p', prompt, '--model', model, '--output-format', 'json']
+    const args = ['-p', prompt, '--model', model, '--output-format', 'json', '--permission-mode', permissionMode]
+    if (resumeSessionId) {
+      args.push('--resume', resumeSessionId)
+    } else if (sessionId) {
+      args.push('--session-id', sessionId)
+    }
+    const effectiveSessionId = resumeSessionId ?? sessionId ?? null
+    if (effectiveSessionId && typeof onSessionStarted === 'function') {
+      try { onSessionStarted(effectiveSessionId) } catch {}
+    }
     const child = spawn(cli, args, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe']
     })
+    if (typeof onSpawn === 'function') {
+      try { onSpawn(child) } catch {}
+    }
 
     let stdout = ''
     let stderr = ''
@@ -139,8 +181,22 @@ export async function runClaudeStage({
       child.kill('SIGTERM')
     }, timeoutMs)
 
+    const lineStream = onEvent
+      ? createLineStream(line => {
+          try {
+            const parsed = JSON.parse(line)
+            onEvent(parsed, line)
+          } catch {
+            // Non-JSON lines — ignore
+          }
+        })
+      : null
+
     child.stdout.on('data', chunk => {
       stdout += chunk.toString()
+      if (lineStream) {
+        lineStream.push(chunk)
+      }
     })
     child.stderr.on('data', chunk => {
       stderr += chunk.toString()
@@ -151,6 +207,9 @@ export async function runClaudeStage({
     })
     child.on('close', exitCode => {
       clearTimeout(timeout)
+      if (lineStream) {
+        lineStream.flush()
+      }
       if (timedOut) {
         reject(new Error(`${stage} timed out after ${timeoutMs}ms`))
         return
@@ -177,6 +236,14 @@ export async function runClaudeStage({
         return
       }
 
+      const envelopeSessionId = typeof envelope?.session_id === 'string'
+        ? envelope.session_id
+        : envelope?.structured?.session_id ?? null
+      const resolvedSessionId = effectiveSessionId ?? envelopeSessionId ?? null
+      if (resolvedSessionId && !effectiveSessionId && typeof onSessionStarted === 'function') {
+        try { onSessionStarted(resolvedSessionId) } catch {}
+      }
+
       resolve({
         exitCode,
         stdout,
@@ -184,7 +251,8 @@ export async function runClaudeStage({
         envelope,
         outputText,
         structured,
-        usage
+        usage,
+        sessionId: resolvedSessionId
       })
     })
   })

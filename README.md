@@ -1,48 +1,50 @@
 # 4CO-OP
 
-4CO-OP is a source repo for a multi-stage coding skill that splits work between Codex and Claude-style model stages.
+4CO-OP is a multi-stage coding skill that splits work between Codex and Claude-style model stages. Type `/4co-op "<what you want>"` inside Claude Code and it plans, builds, reviews, and opens a PR for you.
 
-This README stays intentionally short. Use the docs folder for the full details:
+## Getting Started (3 steps)
 
-- [Architecture](./docs/architecture.md)
-- [Install and layout](./docs/install.md)
-- [Commands](./docs/commands.md)
-- [Config](./docs/config.md)
-- [Runtime files](./docs/runtime.md)
-- [Troubleshooting](./docs/troubleshooting.md)
-- [Privacy and logging](./docs/privacy.md)
-- [Examples](./docs/examples.md)
+### 1. Install the prerequisites
 
-## Install
+You need these four CLIs on your PATH:
 
-### Global Install
+| Tool | Install |
+|---|---|
+| `git` | macOS: `brew install git` · Ubuntu: `sudo apt install git` · https://git-scm.com/downloads |
+| `gh` (GitHub CLI) | `brew install gh`, then `gh auth login` · https://cli.github.com |
+| `claude` (Claude Code) | `npm install -g @anthropic-ai/claude-code` · https://docs.claude.com/en/docs/claude-code |
+| `codex` | `npm install -g @openai/codex` or `brew install codex` · https://github.com/openai/codex |
 
-Install to the global Codex and Claude skill folders:
+### 2. Install 4CO-OP
 
-```bash
-node scripts/install-4coop.mjs --global
-```
-
-Install only one host:
+Clone this repo, then run:
 
 ```bash
-node scripts/install-4coop.mjs --global --host codex
-node scripts/install-4coop.mjs --global --host claude
+node scripts/install-4coop.mjs
 ```
 
-### Project-Local Install
+That's it — with no flags it installs globally for both Claude and Codex and prints a checklist of which prerequisites it found.
 
-Install into a target project:
+Other options if you want them:
 
 ```bash
-node scripts/install-4coop.mjs --project D:/work/my-app
+node scripts/install-4coop.mjs --host claude           # only Claude Code
+node scripts/install-4coop.mjs --host codex            # only Codex
+node scripts/install-4coop.mjs --project ~/my-app      # project-local install
+node scripts/install-4coop.mjs --dry-run               # preview without writing
 ```
 
-You can also install globally and locally in one call:
+### 3. Use it
 
-```bash
-node scripts/install-4coop.mjs --global --project D:/work/my-app
+Open any GitHub-connected project in Claude Code and type:
+
 ```
+/4co-op add dark mode toggle
+```
+
+First run in a project: 4CO-OP will ask to scaffold (say `yes`), then confirm build/test/lint commands. You can reply `ok` to accept the detected values, `skip` to use none at all, or `edit: build=... test=... lint=...` to set them.
+
+After that, just `/4co-op <what you want>` any time.
 
 ## Topology
 
@@ -65,7 +67,7 @@ User (Claude Code (by default))
         └── writes plan.md + acceptance_checklist[]
       │
       ▼
-  ② Builder         codex exec -m gpt-5.3-codex   ◄── external CLI
+  ② Builder         codex exec -m gpt-5.4   ◄── external CLI
         │           sandbox workspace-write, --cd <worktree>
         │           stdin: plan.md
         └── commits to feat/<slug> branch in git worktree
@@ -84,7 +86,7 @@ User (Claude Code (by default))
       │
       ▼   issues found?
   ⑥ Fixer           codex exec resume <builder_session_id>
-        │           -m gpt-5.3-codex
+        │           -m gpt-5.4
         └── commits per-issue fixes to the same branch
       │
       ▼
@@ -116,25 +118,46 @@ In the target project, delete:
 - `.4co-op/`
 - `.claude/skills/4co-op/`
 
-## Basic Usage
+## Day-to-day Usage
 
-Run a feature request from the source wrapper:
+Inside Claude Code, in any GitHub-connected project:
+
+```
+/4co-op add dark mode toggle                 # start a new feature
+/4co-op check comment                        # re-review after you left manual PR comments
+/4co-op clean -- --older-than 30d            # sweep old run data
+/4co-op set-base develop                     # pin a preferred base branch for future runs
+```
+
+CLI equivalents (if you want to run without the slash command):
 
 ```bash
 node scripts/4coop.mjs start --feature "add dark mode toggle"
-```
-
-If the PR already exists and you added manual review comments before merging:
-
-```bash
+node scripts/4coop.mjs start --feature "..." --base develop   # one-off base override
 node scripts/4coop.mjs check-comment
-```
-
-For cleanup:
-
-```bash
 node scripts/4coop.mjs clean -- --dry-run
+node scripts/4coop.mjs set-base develop
 ```
+
+## Monitor Cockpit
+
+Every run writes live events (model turns, file reads, edits, bash calls) under
+`.4co-op/events/` and streams them to a local monitor UI. Open the cockpit URL
+printed at the start of the run to watch stages progress in real time, inspect
+per-stage token usage, browse git status and diffs, and replay any tool call.
+The default browser is the OS default — set `monitor.browser` in config if you
+want a specific one.
+
+## Docs
+
+- [Architecture](./docs/architecture.md)
+- [Install and layout](./docs/install.md)
+- [Commands](./docs/commands.md)
+- [Config](./docs/config.md)
+- [Runtime files](./docs/runtime.md)
+- [Troubleshooting](./docs/troubleshooting.md)
+- [Privacy and logging](./docs/privacy.md)
+- [Examples](./docs/examples.md)
 
 ## License
 

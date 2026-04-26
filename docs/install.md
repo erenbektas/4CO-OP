@@ -93,9 +93,9 @@ Do not edit `.4co-op/install/4co-op/config.json` unless you intentionally want t
 ## Cross-Platform Notes
 
 - The orchestrator and tracker are intended to run on Windows, macOS, and Linux.
-- `monitor_window.browser` defaults to `auto`.
-- With `auto`, 4CO-OP tries to open the tracker in an app-style browser window when it finds a supported browser on the current OS, then falls back to the system default URL opener if needed.
-- You can override `monitor_window.browser` with a platform-specific browser name such as `edge`, `chrome`, `brave`, or an explicit executable path.
+- `monitor_window.browser` defaults to `system`.
+- With `system`, 4CO-OP opens the tracker in the OS default browser (`open` on macOS, `xdg-open` on Linux, `start` on Windows), so the tracker follows whichever browser you already set as your default.
+- Set `monitor_window.browser` to `auto` if you want 4CO-OP to prefer an app-style window via Chrome/Edge/Brave when one is installed, or override it with a specific browser name such as `edge`, `chrome`, `brave`, or an explicit executable path.
 
 ## Runtime Data
 
